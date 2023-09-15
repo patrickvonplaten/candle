@@ -53,6 +53,7 @@ impl Encoder {
         let conv_cfg = nn::Conv2dConfig {
             padding: 1,
             stride: 1,
+            ..Default::default()
         };
         let conv_in = nn::conv2d(
             in_channels,

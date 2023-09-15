@@ -4,6 +4,7 @@ pub mod dinov2;
 pub mod efficientnet;
 pub mod falcon;
 pub mod llama;
+pub mod muse;
 pub mod quantized_llama;
 pub mod segment_anything;
 pub mod stable_diffusion;

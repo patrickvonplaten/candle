@@ -1,9 +1,12 @@
 //! A `VarBuilder` is used to retrieve variables used by a model. These variables can either come
 //! from a pre-trained checkpoint, e.g. using `VarBuilder::from_safetensors`, or initialized for
 //! training, e.g. using `VarBuilder::from_varmap`.
+//!
+#![feature(type_name_of_val)]
 use crate::VarMap;
 use candle::{safetensors::Load, DType, Device, Error, Result, Shape, Tensor};
 use safetensors::{slice::IndexOp, tensor::SafeTensors};
+use std::any::type_name_of_val;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -57,6 +60,8 @@ pub trait Backend: Send + Sync {
     ) -> Result<Tensor>;
 
     fn contains_tensor(&self, name: &str) -> bool;
+
+    fn keys(&self) -> str;
 }
 
 pub trait SimpleBackend: Send + Sync {
@@ -71,6 +76,8 @@ pub trait SimpleBackend: Send + Sync {
     ) -> Result<Tensor>;
 
     fn contains_tensor(&self, name: &str) -> bool;
+
+    fn keys(&self) -> str;
 }
 
 impl<'a> Backend for Box<dyn SimpleBackend + 'a> {
@@ -89,6 +96,8 @@ impl<'a> Backend for Box<dyn SimpleBackend + 'a> {
     fn contains_tensor(&self, name: &str) -> bool {
         self.as_ref().contains_tensor(name)
     }
+
+    fn keys(&self) -> &str {}
 }
 
 impl<'a, B: Backend> VarBuilderArgs<'a, B> {
@@ -103,6 +112,12 @@ impl<'a, B: Backend> VarBuilderArgs<'a, B> {
             path: vec![],
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    pub fn hey(&self) -> String {
+        let keys = self.data.backend.keys().collect();
+        println!("Type: {:?}", keys);
+        "hey".to_string()
     }
 
     /// Returns the prefix of the `VarBuilder`.

@@ -39,8 +39,13 @@ impl ModelFile {
 
 fn run() -> Result<()> {
     println!("Building the autoencoder.");
-    let vae_weights = ModelFile::VQGan.get(None)?;
-    println!("{:?}", vae_weights);
+    let device = Device::Cpu;
+
+    let muse_config = muse::MuseConfig::v256(None, None);
+
+    let vqgan_weights = ModelFile::VQGan.get(None)?;
+    let vqgan = muse_config.build_vqgan(&vqgan_weights, &device, DType::F32);
+    println!("{:?}", vqgan);
     Ok(())
 }
 
