@@ -57,7 +57,7 @@ impl MuseConfig {
         let weights = weights.deserialize()?;
         let vs_vqgan = nn::VarBuilder::from_safetensors(vec![weights], dtype, device);
 
-        println!("{:?}", vs_vqgan.hey());
+        println!("{:?}", vs_vqgan.state_dict());
         let vqgan = vqgan::VQGANModel::new(vs_vqgan, 3, 3, self.vqgan.clone())?;
         Ok(vqgan)
     }
