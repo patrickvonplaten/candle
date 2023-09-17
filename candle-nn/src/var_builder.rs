@@ -6,6 +6,7 @@ use candle::{safetensors::Load, DType, Device, Error, Result, Shape, Tensor};
 use safetensors::{slice::IndexOp, tensor::SafeTensors};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 /// A structure used to retrieve variables, these variables can either come from storage or be
 /// generated via some form of initialization.
@@ -58,7 +59,7 @@ pub trait Backend: Send + Sync {
 
     fn contains_tensor(&self, name: &str) -> bool;
 
-    fn keys(&self) -> Option<Vec<&str>>;
+    fn keys(&self) -> Option<Vec<String>>;
 }
 
 pub trait SimpleBackend: Send + Sync {
@@ -74,7 +75,7 @@ pub trait SimpleBackend: Send + Sync {
 
     fn contains_tensor(&self, name: &str) -> bool;
 
-    fn keys(&self) -> Option<Vec<&str>>;
+    fn keys(&self) -> Option<Vec<String>>;
 }
 
 impl<'a> Backend for Box<dyn SimpleBackend + 'a> {
@@ -94,7 +95,7 @@ impl<'a> Backend for Box<dyn SimpleBackend + 'a> {
         self.as_ref().contains_tensor(name)
     }
 
-    fn keys(&self) -> Option<Vec<&str>> {
+    fn keys(&self) -> Option<Vec<String>> {
         self.as_ref().keys()
     }
 }
@@ -113,18 +114,26 @@ impl<'a, B: Backend> VarBuilderArgs<'a, B> {
         }
     }
 
-    pub fn state_dict(&self) -> HashMap<String, Tensor> {
+    pub fn tensors(&self) -> HashMap<String, Tensor> {
         let binding = self.data.backend.keys().unwrap();
-        let keys = binding.iter();
-        let state_dict: HashMap<_, _> = keys
-            .map(|&name| {
+        let prefix = self.prefix();
+
+        let keys: Vec<String> = binding
+            .iter()
+            .filter(|&k| k.starts_with(&prefix))
+            .map(|k| k[prefix.len() + 1..].to_string())
+            .collect();
+
+        let tensors: HashMap<_, _> = keys
+            .iter()
+            .map(|name| {
                 (
                     name.to_string(),
                     self.get_without_shape(&name, Default::default()).unwrap(),
                 )
             })
             .collect();
-        state_dict
+        tensors
     }
 
     /// Returns the prefix of the `VarBuilder`.
@@ -228,12 +237,14 @@ impl SimpleBackend for Zeros {
     fn get(
         &self,
         s: Option<Shape>,
-        _: &str,
+        name: &str,
         _: crate::Init,
         dtype: DType,
         dev: &Device,
     ) -> Result<Tensor> {
-        let shape = s.expect("s has to be defined");
+        let shape = s.clone().expect("s has to be defined");
+        println!("name {:?}", name);
+        println!("shape {:?}", s.clone());
         Tensor::zeros(shape, dtype, dev)
     }
 
@@ -241,7 +252,8 @@ impl SimpleBackend for Zeros {
         true
     }
 
-    fn keys(&self) -> Option<Vec<&str>> {
+    fn keys(&self) -> Option<Vec<String>> {
+        println!("Zeros");
         None
     }
 }
@@ -279,7 +291,7 @@ impl SimpleBackend for HashMap<String, Tensor> {
         self.contains_key(name)
     }
 
-    fn keys(&self) -> Option<Vec<&str>> {
+    fn keys(&self) -> Option<Vec<String>> {
         None
     }
 }
@@ -300,8 +312,56 @@ impl SimpleBackend for VarMap {
         self.data().lock().unwrap().contains_key(name)
     }
 
-    fn keys(&self) -> Option<Vec<&str>> {
-        None
+    fn keys(&self) -> Option<Vec<String>> {
+        let tensor_data = self.data().lock().unwrap();
+        let keys: Vec<String> = tensor_data.keys().map(|k| k.to_string()).collect();
+        Some(keys)
+    }
+}
+
+struct Shapes {
+    shapes: RwLock<HashMap<String, Shape>>,
+}
+impl Shapes {
+    fn new() -> Self {
+        Shapes {
+            shapes: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl SimpleBackend for Shapes {
+    fn get(
+        &self,
+        s: Option<Shape>,
+        name: &str,
+        _: crate::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Tensor> {
+        {
+            let shapes_read = self.shapes.read().unwrap();
+            if shapes_read.contains_key(name) {
+                let shape: Shape = shapes_read.get(name).unwrap().clone();
+                return Tensor::zeros(shape, dtype, dev);
+            }
+        }
+        // If not found, acquire a write lock
+        {
+            let mut shapes_write = self.shapes.write().unwrap();
+            shapes_write.insert(name.to_string(), s.clone().unwrap());
+            Tensor::zeros(s.clone().unwrap(), dtype, dev)
+        }
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        let shapes_read = self.shapes.read().unwrap();
+        shapes_read.contains_key(name)
+    }
+
+    fn keys(&self) -> Option<Vec<String>> {
+        let shapes_read = self.shapes.read().unwrap();
+        Some(shapes_read.keys().map(|s| s.to_string()).collect())
     }
 }
 
@@ -344,8 +404,8 @@ impl<'a> SimpleBackend for SafeTensorWithRouting<'a> {
         self.routing.contains_key(name)
     }
 
-    fn keys(&self) -> Option<Vec<&str>> {
-        Some(self.routing.keys().map(|s| &s[..]).collect())
+    fn keys(&self) -> Option<Vec<String>> {
+        Some(self.routing.keys().map(|s| s.to_string()).collect())
     }
 }
 
@@ -381,7 +441,7 @@ impl SimpleBackend for candle::npy::NpzTensors {
         self.get(name).map_or(false, |v| v.is_some())
     }
 
-    fn keys(&self) -> Option<Vec<&str>> {
+    fn keys(&self) -> Option<Vec<String>> {
         None
     }
 }
@@ -403,6 +463,11 @@ impl<'a> VarBuilder<'a> {
     /// Initializes a `VarBuilder` that uses zeros for any tensor.
     pub fn zeros(dtype: DType, dev: &Device) -> Self {
         Self::new(Box::new(Zeros), dtype, dev.clone())
+    }
+
+    /// Initializes a `VarBuilder` that uses zeros for any tensor.
+    pub fn shapes(dtype: DType, dev: &Device) -> Self {
+        Self::new(Box::new(Shapes::new()), dtype, dev.clone())
     }
 
     /// Initializes a `VarBuilder` that retrieves tensors stored in a hashtable. An error is
@@ -569,7 +634,7 @@ impl<'a> Backend for ShardedSafeTensors<'a> {
         self.0.routing.contains_key(name)
     }
 
-    fn keys(&self) -> Option<Vec<&str>> {
+    fn keys(&self) -> Option<Vec<String>> {
         None
     }
 }

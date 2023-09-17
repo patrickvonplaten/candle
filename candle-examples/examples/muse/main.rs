@@ -45,7 +45,6 @@ fn run() -> Result<()> {
 
     let vqgan_weights = ModelFile::VQGan.get(None)?;
     let vqgan = muse_config.build_vqgan(&vqgan_weights, &device, DType::F32);
-    println!("{:?}", vqgan);
     Ok(())
 }
 

@@ -5,8 +5,8 @@
 //! before expanding it back to its original shape. This results in the latent values
 //! compressing the original information.
 use super::unet_2d_blocks::{
-    DownEncoderBlock2D, DownEncoderBlock2DConfig, MidBlock, UpDecoderBlock2D,
-    UpDecoderBlock2DConfig,
+    DownEncoderBlock2D, DownEncoderBlock2DConfig, UNetMidBlock2D, UNetMidBlock2DConfig,
+    UpDecoderBlock2D, UpDecoderBlock2DConfig,
 };
 use candle::{Result, Tensor};
 use candle_nn as nn;
@@ -36,7 +36,7 @@ impl Default for EncoderConfig {
 struct Encoder {
     conv_in: nn::Conv2d,
     down_blocks: Vec<DownEncoderBlock2D>,
-    mid_block: MidBlock,
+    mid_block: UNetMidBlock2D,
     conv_norm_out: nn::GroupNorm,
     conv_out: nn::Conv2d,
     #[allow(dead_code)]
@@ -89,7 +89,15 @@ impl Encoder {
             down_blocks.push(down_block)
         }
         let last_block_out_channels = *config.block_out_channels.last().unwrap();
-        let mid_block = MidBlock::new(vs.pp("mid_block"), last_block_out_channels)?;
+        let mid_cfg = UNetMidBlock2DConfig {
+            resnet_eps: 1e-6,
+            output_scale_factor: 1.,
+            attn_num_head_channels: None,
+            resnet_groups: Some(config.norm_num_groups),
+            ..Default::default()
+        };
+        let mid_block =
+            UNetMidBlock2D::new(vs.pp("mid_block"), last_block_out_channels, None, mid_cfg)?;
         let conv_norm_out = nn::group_norm(
             config.norm_num_groups,
             last_block_out_channels,
@@ -143,7 +151,6 @@ struct DecoderConfig {
     block_out_channels: Vec<usize>,
     layers_per_block: usize,
     norm_num_groups: usize,
-    block_in: usize,
 }
 
 impl Default for DecoderConfig {
@@ -152,7 +159,6 @@ impl Default for DecoderConfig {
             block_out_channels: vec![64],
             layers_per_block: 2,
             norm_num_groups: 32,
-            block_in: 768,
         }
     }
 }
@@ -161,9 +167,9 @@ impl Default for DecoderConfig {
 struct Decoder {
     conv_in: nn::Conv2d,
     up_blocks: Vec<UpDecoderBlock2D>,
-    mid_block: MidBlock,
+    mid_block: UNetMidBlock2D,
+    conv_norm_out: nn::GroupNorm,
     conv_out: nn::Conv2d,
-    norm_out: nn::GroupNorm,
     #[allow(dead_code)]
     config: DecoderConfig,
 }
@@ -183,30 +189,37 @@ impl Decoder {
         };
         let conv_in = nn::conv2d(
             in_channels,
-            config.block_out_channels[0],
+            last_block_out_channels,
             3,
             conv_cfg,
             vs.pp("conv_in"),
         )?;
-        let mid_block = MidBlock::new(vs.pp("mid"), config.block_out_channels[0])?;
+        let mid_cfg = UNetMidBlock2DConfig {
+            resnet_eps: 1e-6,
+            output_scale_factor: 1.,
+            attn_num_head_channels: None,
+            resnet_groups: Some(config.norm_num_groups),
+            ..Default::default()
+        };
+        let mid_block =
+            UNetMidBlock2D::new(vs.pp("mid_block"), last_block_out_channels, None, mid_cfg)?;
+        let mut up_blocks = vec![];
+        let vs_up_blocks = vs.pp("up_blocks");
         let reversed_block_out_channels: Vec<_> =
             config.block_out_channels.iter().copied().rev().collect();
-
-        let mut up_blocks = vec![];
-        let vs_up_blocks = vs.pp("up");
         for index in 0..n_block_out_channels {
             let out_channels = reversed_block_out_channels[index];
-            let in_channels = if index < n_block_out_channels - 1 {
-                reversed_block_out_channels[index + 1]
+            let in_channels = if index > 0 {
+                reversed_block_out_channels[index - 1]
             } else {
                 reversed_block_out_channels[0]
             };
-            let is_first = index == 0;
+            let is_final = index + 1 == n_block_out_channels;
             let cfg = UpDecoderBlock2DConfig {
                 num_layers: config.layers_per_block + 1,
                 resnet_eps: 1e-6,
                 resnet_groups: config.norm_num_groups,
-                add_upsample: !is_first,
+                add_upsample: !is_final,
                 ..Default::default()
             };
             let up_block = UpDecoderBlock2D::new(
@@ -221,16 +234,8 @@ impl Decoder {
             padding: 1,
             ..Default::default()
         };
-        let num_groups = 32;
-        let eps = 1e-6;
-        let norm_out = nn::group_norm(
-            num_groups,
-            reversed_block_out_channels[0],
-            eps,
-            vs.pp("norm_out"),
-        )?;
         let conv_out = nn::conv2d(
-            reversed_block_out_channels[0],
+            config.block_out_channels[0],
             out_channels,
             3,
             conv_cfg,
@@ -240,7 +245,6 @@ impl Decoder {
             conv_in,
             up_blocks,
             mid_block,
-            norm_out,
             conv_out,
             config,
         })
@@ -253,7 +257,7 @@ impl Decoder {
         for up_block in self.up_blocks.iter() {
             xs = up_block.forward(&xs)?
         }
-        let xs = self.norm_out.forward(&xs)?;
+        let xs = self.conv_norm_out.forward(&xs)?;
         let xs = nn::ops::silu(&xs)?;
         self.conv_out.forward(&xs)
     }
@@ -329,7 +333,6 @@ impl VQGANModel {
             block_out_channels: config.block_out_channels.clone(),
             layers_per_block: config.layers_per_block,
             norm_num_groups: config.norm_num_groups,
-            block_in: Default::default(),
         };
         let decoder = Decoder::new(vs.pp("decoder"), latent_channels, out_channels, decoder_cfg)?;
         let conv_cfg = Default::default();

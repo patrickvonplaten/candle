@@ -92,7 +92,6 @@ pub struct UNet2DConditionModel {
     time_proj: Timesteps,
     time_embedding: TimestepEmbedding,
     down_blocks: Vec<UNetDownBlock>,
-    mid_block: UNetMidBlock2DCrossAttn,
     up_blocks: Vec<UNetUpBlock>,
     conv_norm_out: nn::GroupNorm,
     conv_out: Conv2d,
@@ -187,25 +186,6 @@ impl UNet2DConditionModel {
             None => 1,
             Some(block) => block.use_cross_attn.unwrap_or(1),
         };
-        let mid_cfg = UNetMidBlock2DCrossAttnConfig {
-            resnet_eps: config.norm_eps,
-            output_scale_factor: config.mid_block_scale_factor,
-            cross_attn_dim: config.cross_attention_dim,
-            attn_num_head_channels: bl_attention_head_dim,
-            resnet_groups: Some(config.norm_num_groups),
-            use_linear_projection: config.use_linear_projection,
-            transformer_layers_per_block: mid_transformer_layers_per_block,
-            ..Default::default()
-        };
-
-        let mid_block = UNetMidBlock2DCrossAttn::new(
-            vs.pp("mid_block"),
-            bl_channels,
-            Some(time_embed_dim),
-            use_flash_attn,
-            mid_cfg,
-        )?;
-
         let vs_ub = vs.pp("up_blocks");
         let up_blocks = (0..n_blocks)
             .map(|i| {
@@ -287,7 +267,6 @@ impl UNet2DConditionModel {
             time_proj,
             time_embedding,
             down_blocks,
-            mid_block,
             up_blocks,
             conv_norm_out,
             conv_out,
@@ -361,14 +340,6 @@ impl UNet2DConditionModel {
             };
         let mut down_block_res_xs = new_down_block_res_xs;
 
-        // 4. mid
-        let xs = self
-            .mid_block
-            .forward(&xs, Some(&emb), Some(encoder_hidden_states))?;
-        let xs = match mid_block_additional_residual {
-            None => xs,
-            Some(m) => (m + xs)?,
-        };
         // 5. up
         let mut xs = xs;
         let mut upsample_size = None;

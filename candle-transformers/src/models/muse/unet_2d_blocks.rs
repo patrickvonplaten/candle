@@ -146,7 +146,7 @@ impl DownEncoderBlock2D {
             (0..(config.num_layers))
                 .map(|i| {
                     let in_channels = if i == 0 { in_channels } else { out_channels };
-                    ResnetBlock2D::new(vs.pp(&i.to_string()), in_channels, conv_cfg)
+                    ResnetBlock2D::new(vs.pp(&i.to_string()), in_channels, in_channels)
                 })
                 .collect::<Result<Vec<_>>>()?
         };
@@ -177,7 +177,7 @@ impl Module for DownEncoderBlock2D {
         let _enter = self.span.enter();
         let mut xs = xs.clone();
         for resnet in self.resnets.iter() {
-            xs = resnet.forward(&xs, None)?
+            xs = resnet.forward(&xs)?
         }
         match &self.downsampler {
             Some(downsampler) => downsampler.forward(&xs),
@@ -223,7 +223,7 @@ impl UpDecoderBlock2D {
         config: UpDecoderBlock2DConfig,
     ) -> Result<Self> {
         let resnets: Vec<_> = {
-            let vs = vs.pp("resnets");
+            let vs = vs.pp("block");
             let conv_cfg = ResnetBlock2DConfig {
                 out_channels: Some(out_channels),
                 eps: config.resnet_eps,
@@ -235,13 +235,12 @@ impl UpDecoderBlock2D {
             (0..(config.num_layers))
                 .map(|i| {
                     let in_channels = if i == 0 { in_channels } else { out_channels };
-                    ResnetBlock2D::new(vs.pp(&i.to_string()), in_channels, conv_cfg)
+                    ResnetBlock2D::new(vs.pp(&i.to_string()), in_channels, out_channels)
                 })
                 .collect::<Result<Vec<_>>>()?
         };
         let upsampler = if config.add_upsample {
-            let upsample =
-                Upsample2D::new(vs.pp("upsamplers").pp("0"), out_channels, out_channels)?;
+            let upsample = Upsample2D::new(vs.pp("upsample"), out_channels, out_channels)?;
             Some(upsample)
         } else {
             None
@@ -261,7 +260,7 @@ impl Module for UpDecoderBlock2D {
         let _enter = self.span.enter();
         let mut xs = xs.clone();
         for resnet in self.resnets.iter() {
-            xs = resnet.forward(&xs, None)?
+            xs = resnet.forward(&xs)?
         }
         match &self.upsampler {
             Some(upsampler) => upsampler.forward(&xs, None),
@@ -270,196 +269,33 @@ impl Module for UpDecoderBlock2D {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct UNetMidBlock2DConfig {
-    pub num_layers: usize,
-    pub resnet_eps: f64,
-    pub resnet_groups: Option<usize>,
-    pub attn_num_head_channels: Option<usize>,
-    // attention_type "default"
-    pub output_scale_factor: f64,
-}
-
-impl Default for UNetMidBlock2DConfig {
-    fn default() -> Self {
-        Self {
-            num_layers: 1,
-            resnet_eps: 1e-6,
-            resnet_groups: Some(32),
-            attn_num_head_channels: Some(1),
-            output_scale_factor: 1.,
-        }
-    }
-}
-
 #[derive(Debug)]
-pub struct UNetMidBlock2D {
-    resnet: ResnetBlock2D,
-    attn_resnets: Vec<(AttentionBlock, ResnetBlock2D)>,
+pub struct MidBlock {
+    resnet1: ResnetBlock2D,
+    resnet2: ResnetBlock2D,
     span: tracing::Span,
-    pub config: UNetMidBlock2DConfig,
 }
 
-impl UNetMidBlock2D {
-    pub fn new(
-        vs: nn::VarBuilder,
-        in_channels: usize,
-        temb_channels: Option<usize>,
-        config: UNetMidBlock2DConfig,
-    ) -> Result<Self> {
-        let vs_resnets = vs.pp("resnets");
-        let vs_attns = vs.pp("attentions");
-        let resnet_groups = config
-            .resnet_groups
-            .unwrap_or_else(|| usize::min(in_channels / 4, 32));
-        let resnet_cfg = ResnetBlock2DConfig {
-            eps: config.resnet_eps,
-            groups: resnet_groups,
-            output_scale_factor: config.output_scale_factor,
-            temb_channels,
-            ..Default::default()
-        };
-        let resnet = ResnetBlock2D::new(vs_resnets.pp("0"), in_channels, resnet_cfg)?;
-        let attn_cfg = AttentionBlockConfig {
-            num_head_channels: config.attn_num_head_channels,
-            num_groups: resnet_groups,
-            rescale_output_factor: config.output_scale_factor,
-            eps: config.resnet_eps,
-        };
-        let mut attn_resnets = vec![];
-        for index in 0..config.num_layers {
-            let attn = AttentionBlock::new(vs_attns.pp(&index.to_string()), in_channels, attn_cfg)?;
-            let resnet = ResnetBlock2D::new(
-                vs_resnets.pp(&(index + 1).to_string()),
-                in_channels,
-                resnet_cfg,
-            )?;
-            attn_resnets.push((attn, resnet))
-        }
+impl MidBlock {
+    pub fn new(vs: nn::VarBuilder, in_channels: usize) -> Result<Self> {
+        let block_1 = vs.pp("block_1");
+        let block_2 = vs.pp("block_2");
+
+        let resnet1 = ResnetBlock2D::new(block_1, in_channels, in_channels)?;
+        let resnet2 = ResnetBlock2D::new(block_2, in_channels, in_channels)?;
         let span = tracing::span!(tracing::Level::TRACE, "mid2d");
         Ok(Self {
-            resnet,
-            attn_resnets,
+            resnet1,
+            resnet2,
             span,
-            config,
         })
     }
 
     pub fn forward(&self, xs: &Tensor, temb: Option<&Tensor>) -> Result<Tensor> {
         let _enter = self.span.enter();
-        let mut xs = self.resnet.forward(xs, temb)?;
-        for (attn, resnet) in self.attn_resnets.iter() {
-            xs = resnet.forward(&attn.forward(&xs)?, temb)?
-        }
-        Ok(xs)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct UNetMidBlock2DCrossAttnConfig {
-    pub num_layers: usize,
-    pub resnet_eps: f64,
-    pub resnet_groups: Option<usize>,
-    pub attn_num_head_channels: usize,
-    // attention_type "default"
-    pub output_scale_factor: f64,
-    pub cross_attn_dim: usize,
-    pub sliced_attention_size: Option<usize>,
-    pub use_linear_projection: bool,
-    pub transformer_layers_per_block: usize,
-}
-
-impl Default for UNetMidBlock2DCrossAttnConfig {
-    fn default() -> Self {
-        Self {
-            num_layers: 1,
-            resnet_eps: 1e-6,
-            resnet_groups: Some(32),
-            attn_num_head_channels: 1,
-            output_scale_factor: 1.,
-            cross_attn_dim: 1280,
-            sliced_attention_size: None, // Sliced attention disabled
-            use_linear_projection: false,
-            transformer_layers_per_block: 1,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct UNetMidBlock2DCrossAttn {
-    resnet: ResnetBlock2D,
-    attn_resnets: Vec<(SpatialTransformer, ResnetBlock2D)>,
-    span: tracing::Span,
-    pub config: UNetMidBlock2DCrossAttnConfig,
-}
-
-impl UNetMidBlock2DCrossAttn {
-    pub fn new(
-        vs: nn::VarBuilder,
-        in_channels: usize,
-        temb_channels: Option<usize>,
-        use_flash_attn: bool,
-        config: UNetMidBlock2DCrossAttnConfig,
-    ) -> Result<Self> {
-        let vs_resnets = vs.pp("resnets");
-        let vs_attns = vs.pp("attentions");
-        let resnet_groups = config
-            .resnet_groups
-            .unwrap_or_else(|| usize::min(in_channels / 4, 32));
-        let resnet_cfg = ResnetBlock2DConfig {
-            eps: config.resnet_eps,
-            groups: resnet_groups,
-            output_scale_factor: config.output_scale_factor,
-            temb_channels,
-            ..Default::default()
-        };
-        let resnet = ResnetBlock2D::new(vs_resnets.pp("0"), in_channels, resnet_cfg)?;
-        let n_heads = config.attn_num_head_channels;
-        let attn_cfg = SpatialTransformerConfig {
-            depth: config.transformer_layers_per_block,
-            num_groups: resnet_groups,
-            context_dim: Some(config.cross_attn_dim),
-            sliced_attention_size: config.sliced_attention_size,
-            use_linear_projection: config.use_linear_projection,
-        };
-        let mut attn_resnets = vec![];
-        for index in 0..config.num_layers {
-            let attn = SpatialTransformer::new(
-                vs_attns.pp(&index.to_string()),
-                in_channels,
-                n_heads,
-                in_channels / n_heads,
-                use_flash_attn,
-                attn_cfg,
-            )?;
-            let resnet = ResnetBlock2D::new(
-                vs_resnets.pp(&(index + 1).to_string()),
-                in_channels,
-                resnet_cfg,
-            )?;
-            attn_resnets.push((attn, resnet))
-        }
-        let span = tracing::span!(tracing::Level::TRACE, "xa-mid2d");
-        Ok(Self {
-            resnet,
-            attn_resnets,
-            span,
-            config,
-        })
-    }
-
-    pub fn forward(
-        &self,
-        xs: &Tensor,
-        temb: Option<&Tensor>,
-        encoder_hidden_states: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let _enter = self.span.enter();
-        let mut xs = self.resnet.forward(xs, temb)?;
-        for (attn, resnet) in self.attn_resnets.iter() {
-            xs = resnet.forward(&attn.forward(&xs, encoder_hidden_states)?, temb)?
-        }
-        Ok(xs)
+        let xs = self.resnet1.forward(&xs).unwrap();
+        let xs = self.resnet2.forward(&xs);
+        xs
     }
 }
 
@@ -515,7 +351,7 @@ impl DownBlock2D {
         let resnets = (0..config.num_layers)
             .map(|i| {
                 let in_channels = if i == 0 { in_channels } else { out_channels };
-                ResnetBlock2D::new(vs_resnets.pp(&i.to_string()), in_channels, resnet_cfg)
+                ResnetBlock2D::new(vs_resnets.pp(&i.to_string()), in_channels, in_channels)
             })
             .collect::<Result<Vec<_>>>()?;
         let downsampler = if config.add_downsample {
@@ -544,7 +380,7 @@ impl DownBlock2D {
         let mut xs = xs.clone();
         let mut output_states = vec![];
         for resnet in self.resnets.iter() {
-            xs = resnet.forward(&xs, temb)?;
+            xs = resnet.forward(&xs)?;
             output_states.push(xs.clone());
         }
         let xs = match &self.downsampler {
@@ -647,7 +483,7 @@ impl CrossAttnDownBlock2D {
         let mut output_states = vec![];
         let mut xs = xs.clone();
         for (resnet, attn) in self.downblock.resnets.iter().zip(self.attentions.iter()) {
-            xs = resnet.forward(&xs, temb)?;
+            xs = resnet.forward(&xs)?;
             xs = attn.forward(&xs, encoder_hidden_states)?;
             output_states.push(xs.clone());
         }
@@ -724,7 +560,7 @@ impl UpBlock2D {
                     out_channels
                 };
                 let in_channels = resnet_in_channels + res_skip_channels;
-                ResnetBlock2D::new(vs_resnets.pp(&i.to_string()), in_channels, resnet_cfg)
+                ResnetBlock2D::new(vs_resnets.pp(&i.to_string()), in_channels, in_channels)
             })
             .collect::<Result<Vec<_>>>()?;
         let upsampler = if config.add_upsample {
@@ -755,7 +591,7 @@ impl UpBlock2D {
         for (index, resnet) in self.resnets.iter().enumerate() {
             xs = Tensor::cat(&[&xs, &res_xs[res_xs.len() - index - 1]], 1)?;
             xs = xs.contiguous()?;
-            xs = resnet.forward(&xs, temb)?;
+            xs = resnet.forward(&xs)?;
         }
         match &self.upsampler {
             Some(upsampler) => upsampler.forward(&xs, upsample_size),
@@ -857,7 +693,7 @@ impl CrossAttnUpBlock2D {
         for (index, resnet) in self.upblock.resnets.iter().enumerate() {
             xs = Tensor::cat(&[&xs, &res_xs[res_xs.len() - index - 1]], 1)?;
             xs = xs.contiguous()?;
-            xs = resnet.forward(&xs, temb)?;
+            xs = resnet.forward(&xs)?;
             xs = self.attentions[index].forward(&xs, encoder_hidden_states)?;
         }
         match &self.upblock.upsampler {
