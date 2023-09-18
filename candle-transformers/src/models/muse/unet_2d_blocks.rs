@@ -134,25 +134,17 @@ impl DownEncoderBlock2D {
         config: DownEncoderBlock2DConfig,
     ) -> Result<Self> {
         let resnets: Vec<_> = {
-            let vs = vs.pp("resnets");
-            let conv_cfg = ResnetBlock2DConfig {
-                eps: config.resnet_eps,
-                out_channels: Some(out_channels),
-                groups: config.resnet_groups,
-                output_scale_factor: config.output_scale_factor,
-                temb_channels: None,
-                ..Default::default()
-            };
+            let vs = vs.pp("block");
             (0..(config.num_layers))
                 .map(|i| {
                     let in_channels = if i == 0 { in_channels } else { out_channels };
-                    ResnetBlock2D::new(vs.pp(&i.to_string()), in_channels, in_channels)
+                    ResnetBlock2D::new(vs.pp(&i.to_string()), in_channels, out_channels)
                 })
                 .collect::<Result<Vec<_>>>()?
         };
         let downsampler = if config.add_downsample {
             let downsample = Downsample2D::new(
-                vs.pp("downsamplers").pp("0"),
+                vs.pp("downsample"),
                 out_channels,
                 true,
                 out_channels,

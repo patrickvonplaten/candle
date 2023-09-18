@@ -55,23 +55,26 @@ impl Encoder {
             stride: 1,
             ..Default::default()
         };
+        let reversed_block_out_channels: Vec<_> =
+            config.block_out_channels.iter().copied().rev().collect();
         let conv_in = nn::conv2d(
             in_channels,
-            config.block_out_channels[0],
+            reversed_block_out_channels[0],
             3,
             conv_cfg,
             vs.pp("conv_in"),
         )?;
         let mut down_blocks = vec![];
-        let vs_down_blocks = vs.pp("down_blocks");
-        for index in 0..config.block_out_channels.len() {
-            let out_channels = config.block_out_channels[index];
+        let vs_down_blocks = vs.pp("down");
+        let num_blocks = reversed_block_out_channels.len();
+        for index in 0..num_blocks {
+            let out_channels = reversed_block_out_channels[index];
             let in_channels = if index > 0 {
-                config.block_out_channels[index - 1]
+                reversed_block_out_channels[index - 1]
             } else {
-                config.block_out_channels[0]
+                reversed_block_out_channels[index]
             };
-            let is_final = index + 1 == config.block_out_channels.len();
+            let is_final = index + 1 == reversed_block_out_channels.len();
             let cfg = DownEncoderBlock2DConfig {
                 num_layers: config.layers_per_block,
                 resnet_eps: 1e-6,
@@ -88,26 +91,21 @@ impl Encoder {
             )?;
             down_blocks.push(down_block)
         }
-        let last_block_out_channels = *config.block_out_channels.last().unwrap();
-        let mid_block = MidBlock::new(vs.pp("mid_block"), last_block_out_channels)?;
+        let last_block_out_channels = config.block_out_channels[0];
+        let mid_block = MidBlock::new(vs.pp("mid"), last_block_out_channels)?;
         let conv_norm_out = nn::group_norm(
             config.norm_num_groups,
             last_block_out_channels,
             1e-6,
-            vs.pp("conv_norm_out"),
+            vs.pp("norm_out"),
         )?;
-        let conv_out_channels = if config.double_z {
-            2 * out_channels
-        } else {
-            out_channels
-        };
         let conv_cfg = nn::Conv2dConfig {
             padding: 1,
             ..Default::default()
         };
         let conv_out = nn::conv2d(
             last_block_out_channels,
-            conv_out_channels,
+            out_channels,
             3,
             conv_cfg,
             vs.pp("conv_out"),
@@ -199,7 +197,7 @@ impl Decoder {
             let in_channels = if index < n_block_out_channels - 1 {
                 reversed_block_out_channels[index + 1]
             } else {
-                reversed_block_out_channels[0]
+                reversed_block_out_channels[index]
             };
             let is_first = index == 0;
             let cfg = UpDecoderBlock2DConfig {
@@ -265,6 +263,7 @@ pub struct VQGANModelConfig {
     pub layers_per_block: usize,
     pub latent_channels: usize,
     pub norm_num_groups: usize,
+    pub num_embeddings: usize,
 }
 
 impl Default for VQGANModelConfig {
@@ -274,6 +273,7 @@ impl Default for VQGANModelConfig {
             layers_per_block: 1,
             latent_channels: 4,
             norm_num_groups: 32,
+            num_embeddings: 8192,
         }
     }
 }
@@ -307,6 +307,7 @@ pub struct VQGANModel {
     decoder: Decoder,
     quant_conv: nn::Conv2d,
     post_quant_conv: nn::Conv2d,
+    embedding: nn::Embedding,
     pub config: VQGANModelConfig,
 }
 
@@ -334,11 +335,16 @@ impl VQGANModel {
         let decoder = Decoder::new(vs.pp("decoder"), latent_channels, out_channels, decoder_cfg)?;
         let conv_cfg = Default::default();
         let quant_conv = nn::conv2d(
-            2 * latent_channels,
-            2 * latent_channels,
+            latent_channels,
+            latent_channels,
             1,
             conv_cfg,
             vs.pp("quant_conv"),
+        )?;
+        let embedding = nn::embedding(
+            config.num_embeddings,
+            latent_channels,
+            vs.pp("quantize.embedding"),
         )?;
         let post_quant_conv = nn::conv2d(
             latent_channels,
@@ -352,6 +358,7 @@ impl VQGANModel {
             decoder,
             quant_conv,
             post_quant_conv,
+            embedding,
             config,
         })
     }

@@ -116,12 +116,16 @@ impl<'a, B: Backend> VarBuilderArgs<'a, B> {
 
     pub fn tensors(&self) -> HashMap<String, Tensor> {
         let binding = self.data.backend.keys().unwrap();
-        let prefix = self.prefix();
+        let prefix = if self.prefix().len() == 0 {
+            self.prefix()
+        } else {
+            self.prefix() + "."
+        };
 
         let keys: Vec<String> = binding
             .iter()
             .filter(|&k| k.starts_with(&prefix))
-            .map(|k| k[prefix.len() + 1..].to_string())
+            .map(|k| k[prefix.len()..].to_string())
             .collect();
 
         let tensors: HashMap<_, _> = keys

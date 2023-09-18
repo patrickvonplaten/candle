@@ -38,6 +38,7 @@ impl MuseConfig {
             layers_per_block: 2,
             latent_channels: 64,
             norm_num_groups: 32,
+            num_embeddings: 8192,
         };
 
         Self {
@@ -57,30 +58,48 @@ impl MuseConfig {
         let weights = unsafe { candle::safetensors::MmapedFile::new(vae_weights)? };
         let weights = weights.deserialize()?;
         let vs_vqgan = nn::VarBuilder::from_safetensors(vec![weights], dtype, device);
-        let tensor_dict = vs_vqgan.tensors();
+
+        let mut entries: Vec<_> = vs_vqgan.tensors().into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         // println!("{:?}", vs_vqgan.tensors());
         // let var_builder = nn::VarBuilder::from_varmap(&nn::VarMap::new(), dtype, device);
         let var_builder = nn::VarBuilder::shapes(dtype, device);
         let vqgan = vqgan::VQGANModel::new(var_builder.clone(), 3, 3, self.vqgan_config.clone())?;
 
-        let var_builder = var_builder.pp("decoder");
+        let tensor_dict_new = var_builder.tensors();
+
+        for (key, value) in entries.iter() {
+            match tensor_dict_new.get(key) {
+                Some(&ref value2) => {
+                    if value2.shape() != value.shape() {
+                        println!(
+                            "For {} original model has shape {:?}, but new model has {:?}",
+                            key,
+                            value.shape(),
+                            value2.shape()
+                        );
+                    }
+                }
+                None => println!("No value found for key '{}'", key),
+            }
+        }
         let mut entries: Vec<_> = var_builder.tensors().into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (key, value) in entries.iter() {
-            match map.get(key) {
-                Some(&value2) => {
-                    if value2 
-
-                }println!("The value for key '{}' is {}", key, value),
+            match vs_vqgan.tensors().get(key) {
+                Some(&ref value2) => {
+                    if value2.shape() != value.shape() {
+                        println!(
+                            "For {} original model has shape {:?}, but new model has {:?}",
+                            key,
+                            value.shape(),
+                            value2.shape()
+                        );
+                    }
+                }
                 None => println!("No value found for key '{}'", key),
-            }
-
-            if tensor_dict.contains_key(key) and tensor_dict
-
-            } else {
-                println!("{}: {:?}", key, value.shape());
             }
         }
         Ok(vqgan)

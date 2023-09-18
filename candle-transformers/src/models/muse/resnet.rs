@@ -80,7 +80,7 @@ impl ResnetBlock2D {
                 out_channels,
                 1,
                 conv_cfg,
-                vs.pp("conv_shortcut"),
+                vs.pp("nin_shortcut"),
             )?)
         } else {
             None
