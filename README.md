@@ -8,7 +8,9 @@ Candle is a minimalist ML framework for Rust with a focus on performance (includ
 and ease of use. Try our online demos: 
 [whisper](https://huggingface.co/spaces/lmz/candle-whisper),
 [LLaMA2](https://huggingface.co/spaces/lmz/candle-llama2),
-[yolo](https://huggingface.co/spaces/lmz/candle-yolo).
+[yolo](https://huggingface.co/spaces/lmz/candle-yolo),
+[Segment
+Anything](https://huggingface.co/spaces/radames/candle-segment-anything-wasm).
 
 ## Get started
 
@@ -50,6 +52,7 @@ These online demos run entirely in your browser:
   object recognition.
 - [whisper](https://huggingface.co/spaces/lmz/candle-whisper): text to speech.
 - [LLaMA2](https://huggingface.co/spaces/lmz/candle-llama2): text generation.
+- [Segment Anything Model](https://huggingface.co/spaces/radames/candle-segment-anything-wasm): Image segmentation.
 
 We also provide a some command line based examples using state of the art models:
 
@@ -79,7 +82,7 @@ We also provide a some command line based examples using state of the art models
 <img src="https://github.com/huggingface/candle/raw/main/candle-examples/examples/segment-anything/assets/sam_merged.jpg" width="200">
 
 - [Whisper](./candle-examples/examples/whisper/): speech recognition model.
-- [Bert](./candle-examples/examples/bert/): useful for sentence embeddings.
+- [T5](./candle-examples/examples/t5), [Bert](./candle-examples/examples/bert/): useful for sentence embeddings.
 - [DINOv2](./candle-examples/examples/dinov2/): computer vision model trained
   using self-supervision (can be used for imagenet classification, depth
   evaluation, segmentation).
@@ -96,7 +99,8 @@ There are also some wasm examples for whisper and
 [llama2.c](https://github.com/karpathy/llama2.c). You can either build them with
 `trunk` or try them online:
 [whisper](https://huggingface.co/spaces/lmz/candle-whisper),
-[llama2](https://huggingface.co/spaces/lmz/candle-llama2).
+[llama2](https://huggingface.co/spaces/lmz/candle-llama2),
+[Segment Anything Model](https://huggingface.co/spaces/radames/candle-segment-anything-wasm).
 
 For LLaMA2, run the following command to retrieve the weight files and start a
 test server:
@@ -112,8 +116,7 @@ And then head over to
 <!--- ANCHOR: useful_libraries --->
 
 ## Useful Libraries
-- `candle-lora`
-    - [`candle-lora`](https://github.com/EricLBuehler/candle-lora) provides a LoRA implementation that conforms to the official `peft` implementation.
+- [`candle-lora`](https://github.com/EricLBuehler/candle-lora) provides a LoRA implementation that conforms to the official `peft` implementation.
 
 If you have an addition to this list, please submit a pull request.
 
@@ -131,10 +134,20 @@ If you have an addition to this list, please submit a pull request.
     - CUDA backend for efficiently running on GPUs, multiple GPU distribution via NCCL.
     - WASM support, run your models in a browser.
 - Included models.
-    - LLMs: LLaMA v1 and v2, Falcon, StarCoder.
+    - Language Models.
+        - LLaMA v1 and v2.
+        - Falcon.
+        - StarCoder.
+        - T5.
+        - Bert.
     - Whisper (multi-lingual support).
-    - Stable Diffusion.
-    - Computer Vision: DINOv2, EfficientNet, yolo-v3, yolo-v8.
+    - Stable Diffusion v1.5, v2.1, XL v1.0.
+    - Computer Vision Models.
+        - DINOv2.
+        - EfficientNet.
+        - yolo-v3.
+        - yolo-v8.
+        - Segment-Anything Model (SAM).
 - File formats: load models from safetensors, npz, ggml, or PyTorch files.
 - Serverless (on CPU), small and fast deployments.
 - Quantization support using the llama.cpp quantized types.
