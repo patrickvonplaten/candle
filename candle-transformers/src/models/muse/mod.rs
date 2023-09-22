@@ -2,9 +2,9 @@ pub mod attention;
 pub mod clip;
 pub mod embeddings;
 pub mod resnet;
-pub mod unet_2d;
 pub mod unet_2d_blocks;
 pub mod utils;
+pub mod uvit;
 pub mod vqgan;
 
 use candle::{DType, Device, Result};
@@ -15,8 +15,8 @@ use nn::var_builder;
 pub struct MuseConfig {
     pub width: usize,
     pub height: usize,
-    pub clip: clip::Config,
-    vqgan_config: vqgan::VQGANModelConfig,
+    pub clip_config: clip::Config,
+    pub vqgan_config: vqgan::VQGANModelConfig,
 }
 
 impl MuseConfig {
@@ -44,9 +44,31 @@ impl MuseConfig {
         Self {
             width,
             height,
-            clip: clip::Config::v1_5(),
+            clip_config: clip::Config::v1_5(),
             vqgan_config,
         }
+    }
+
+    pub fn build_clip_transformer<P: AsRef<std::path::Path>>(
+        &self,
+        clip_weights: P,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<clip::ClipTextTransformer> {
+        let weights = unsafe { candle::safetensors::MmapedFile::new(clip_weights)? };
+        let weights = weights.deserialize()?;
+        let vs = nn::VarBuilder::from_safetensors(vec![weights], dtype, device);
+        let text_model = clip::ClipTextTransformer::new(vs, &self.clip_config.clone())?;
+        Ok(text_model)
+    }
+
+    pub fn build_uvit_transformer<P: AsRef<std::path::Path>>(
+        &self,
+        uvit_weights: P,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<clip::UViTTransformer> {
+        Ok(uvit_model)
     }
 
     pub fn build_vqgan<P: AsRef<std::path::Path>>(
@@ -58,50 +80,51 @@ impl MuseConfig {
         let weights = unsafe { candle::safetensors::MmapedFile::new(vae_weights)? };
         let weights = weights.deserialize()?;
         let vs_vqgan = nn::VarBuilder::from_safetensors(vec![weights], dtype, device);
-
-        let mut entries: Vec<_> = vs_vqgan.tensors().into_iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // println!("{:?}", vs_vqgan.tensors());
-        // let var_builder = nn::VarBuilder::from_varmap(&nn::VarMap::new(), dtype, device);
-        let var_builder = nn::VarBuilder::shapes(dtype, device);
-        let vqgan = vqgan::VQGANModel::new(var_builder.clone(), 3, 3, self.vqgan_config.clone())?;
-
-        let tensor_dict_new = var_builder.tensors();
-
-        for (key, value) in entries.iter() {
-            match tensor_dict_new.get(key) {
-                Some(&ref value2) => {
-                    if value2.shape() != value.shape() {
-                        println!(
-                            "For {} original model has shape {:?}, but new model has {:?}",
-                            key,
-                            value.shape(),
-                            value2.shape()
-                        );
-                    }
-                }
-                None => println!("No value found for key '{}'", key),
-            }
-        }
-        let mut entries: Vec<_> = var_builder.tensors().into_iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        for (key, value) in entries.iter() {
-            match vs_vqgan.tensors().get(key) {
-                Some(&ref value2) => {
-                    if value2.shape() != value.shape() {
-                        println!(
-                            "For {} original model has shape {:?}, but new model has {:?}",
-                            key,
-                            value.shape(),
-                            value2.shape()
-                        );
-                    }
-                }
-                None => println!("No value found for key '{}'", key),
-            }
-        }
+        let vqgan = vqgan::VQGANModel::new(vs_vqgan.clone(), 3, 3, self.vqgan_config.clone())?;
         Ok(vqgan)
+        // let mut entries: Vec<_> = vs_vqgan.tensors().into_iter().collect();
+        // entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // // println!("{:?}", vs_vqgan.tensors());
+        // // let var_builder = nn::VarBuilder::from_varmap(&nn::VarMap::new(), dtype, device);
+        // let var_builder = nn::VarBuilder::shapes(dtype, device);
+        // let vqgan = vqgan::VQGANModel::new(var_builder.clone(), 3, 3, self.vqgan_config.clone())?;
+
+        // let tensor_dict_new = var_builder.tensors();
+
+        // for (key, value) in entries.iter() {
+        //     match tensor_dict_new.get(key) {
+        //         Some(&ref value2) => {
+        //             if value2.shape() != value.shape() {
+        //                 println!(
+        //                     "For {} original model has shape {:?}, but new model has {:?}",
+        //                     key,
+        //                     value.shape(),
+        //                     value2.shape()
+        //                 );
+        //             }
+        //         }
+        //         None => println!("No value found for key '{}'", key),
+        //     }
+        // }
+        // let mut entries: Vec<_> = var_builder.tensors().into_iter().collect();
+        // entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // for (key, value) in entries.iter() {
+        //     match vs_vqgan.tensors().get(key) {
+        //         Some(&ref value2) => {
+        //             if value2.shape() != value.shape() {
+        //                 println!(
+        //                     "For {} original model has shape {:?}, but new model has {:?}",
+        //                     key,
+        //                     value.shape(),
+        //                     value2.shape()
+        //                 );
+        //             }
+        //         }
+        //         None => println!("No value found for key '{}'", key),
+        //     }
+        // }
+        // Ok(vqgan)
     }
 }

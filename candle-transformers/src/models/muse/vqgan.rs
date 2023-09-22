@@ -278,26 +278,6 @@ impl Default for VQGANModelConfig {
     }
 }
 
-pub struct DiagonalGaussianDistribution {
-    mean: Tensor,
-    std: Tensor,
-}
-
-impl DiagonalGaussianDistribution {
-    pub fn new(parameters: &Tensor) -> Result<Self> {
-        let mut parameters = parameters.chunk(2, 1)?.into_iter();
-        let mean = parameters.next().unwrap();
-        let logvar = parameters.next().unwrap();
-        let std = (logvar * 0.5)?.exp()?;
-        Ok(DiagonalGaussianDistribution { mean, std })
-    }
-
-    pub fn sample(&self) -> Result<Tensor> {
-        let sample = self.mean.randn_like(0., 1.);
-        &self.mean + &self.std * sample
-    }
-}
-
 // https://github.com/huggingface/diffusers/blob/970e30606c2944e3286f56e8eb6d3dc6d1eb85f7/src/diffusers/models/vae.py#L485
 // This implementation is specific to the config used in stable-diffusion-v1-5
 // https://huggingface.co/runwayml/stable-diffusion-v1-5/blob/main/vae/config.json
@@ -364,10 +344,9 @@ impl VQGANModel {
     }
 
     /// Returns the distribution in the latent space.
-    pub fn encode(&self, xs: &Tensor) -> Result<DiagonalGaussianDistribution> {
+    pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = self.encoder.forward(xs)?;
-        let parameters = self.quant_conv.forward(&xs)?;
-        DiagonalGaussianDistribution::new(&parameters)
+        Ok(xs)
     }
 
     /// Takes as input some sampled values.
