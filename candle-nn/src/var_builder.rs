@@ -1,6 +1,6 @@
 //! A `VarBuilder` is used to retrieve variables used by a model. These variables can either come
-//! from a pre-trained checkpoint, e.g. using `VarBuilder::from_safetensors`, or initialized for
-//! training, e.g. using `VarBuilder::from_varmap`.
+//! from a pre-trained checkpoint, e.g. using `VarBuilder::from_mmaped_safetensors`, or initialized
+//! for training, e.g. using `VarBuilder::from_varmap`.
 use crate::VarMap;
 use candle::{safetensors::Load, DType, Device, Error, Result, Shape, Tensor};
 use safetensors::{slice::IndexOp, tensor::SafeTensors};
@@ -450,6 +450,58 @@ impl SimpleBackend for candle::npy::NpzTensors {
     }
 }
 
+impl SimpleBackend for candle::safetensors::MmapedSafetensors {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _: crate::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Tensor> {
+        let tensor = self.load(name, dev)?.to_dtype(dtype)?;
+        if tensor.shape() != &s {
+            Err(candle::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            }
+            .bt())?
+        }
+        Ok(tensor)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.get(name).is_ok()
+    }
+}
+
+impl SimpleBackend for candle::safetensors::BufferedSafetensors {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _: crate::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Tensor> {
+        let tensor = self.load(name, dev)?.to_dtype(dtype)?;
+        if tensor.shape() != &s {
+            Err(candle::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            }
+            .bt())?
+        }
+        Ok(tensor)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.get(name).is_ok()
+    }
+}
+
 impl<'a> VarBuilder<'a> {
     fn new(backend: Box<dyn SimpleBackend + 'a>, dtype: DType, device: Device) -> Self {
         let data = TensorData {
@@ -491,7 +543,11 @@ impl<'a> VarBuilder<'a> {
     }
 
     /// Initializes a `VarBuilder` that retrieves tensors stored in a collection of safetensors
-    /// files.
+    /// data.
+    #[deprecated(
+        since = "0.2.3",
+        note = "use from_mmaped_safetensors or from_buffered_safetensors instead"
+    )]
     pub fn from_safetensors(safetensors: Vec<SafeTensors<'a>>, dtype: DType, dev: &Device) -> Self {
         let mut routing = HashMap::new();
         for (index, sf) in safetensors.iter().enumerate() {
@@ -506,6 +562,27 @@ impl<'a> VarBuilder<'a> {
         Self::new(Box::new(tensors), dtype, dev.clone())
     }
 
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a collection of safetensors
+    /// files.
+    ///
+    /// # Safety
+    ///
+    /// The unsafe is inherited from [`memmap2::MmapOptions`].
+    pub unsafe fn from_mmaped_safetensors<P: AsRef<std::path::Path>>(
+        paths: &[P],
+        dtype: DType,
+        dev: &Device,
+    ) -> Result<Self> {
+        let tensors = candle::safetensors::MmapedSafetensors::multi(paths)?;
+        Ok(Self::new(Box::new(tensors), dtype, dev.clone()))
+    }
+
+    /// Initializes a `VarBuilder` from a binary builder in the safetensor format.
+    pub fn from_buffered_safetensors(data: Vec<u8>, dtype: DType, dev: &Device) -> Result<Self> {
+        let tensors = candle::safetensors::BufferedSafetensors::new(data)?;
+        Ok(Self::new(Box::new(tensors), dtype, dev.clone()))
+    }
+
     /// Initializes a `VarBuilder` that retrieves tensors stored in a numpy npz file.
     pub fn from_npz<P: AsRef<std::path::Path>>(p: P, dtype: DType, dev: &Device) -> Result<Self> {
         let npz = candle::npy::NpzTensors::new(p)?;
@@ -513,27 +590,24 @@ impl<'a> VarBuilder<'a> {
     }
 }
 
-pub struct ShardedSafeTensors<'a>(SafeTensorWithRouting<'a>);
-pub type ShardedVarBuilder<'a> = VarBuilderArgs<'a, ShardedSafeTensors<'a>>;
+pub struct ShardedSafeTensors(candle::safetensors::MmapedSafetensors);
+pub type ShardedVarBuilder<'a> = VarBuilderArgs<'a, ShardedSafeTensors>;
 
-impl<'a> ShardedSafeTensors<'a> {
-    pub fn var_builder(
-        safetensors: Vec<SafeTensors<'a>>,
+impl ShardedSafeTensors {
+    /// Initializes a `VarBuilder` that retrieves tensors stored in a collection of safetensors
+    /// files and make them usable in a sharded way.
+    ///
+    /// # Safety
+    ///
+    /// The unsafe is inherited from [`memmap2::MmapOptions`].
+    pub unsafe fn var_builder<P: AsRef<std::path::Path>>(
+        paths: &[P],
         dtype: DType,
         dev: &Device,
-    ) -> ShardedVarBuilder<'a> {
-        let mut routing = HashMap::new();
-        for (index, sf) in safetensors.iter().enumerate() {
-            for k in sf.names() {
-                routing.insert(k.to_string(), index);
-            }
-        }
-        let tensors = SafeTensorWithRouting {
-            routing,
-            safetensors,
-        };
+    ) -> Result<ShardedVarBuilder<'static>> {
+        let tensors = candle::safetensors::MmapedSafetensors::multi(paths)?;
         let backend = ShardedSafeTensors(tensors);
-        VarBuilderArgs::new_with_args(backend, dtype, dev)
+        Ok(VarBuilderArgs::new_with_args(backend, dtype, dev))
     }
 }
 
@@ -565,7 +639,7 @@ impl Default for Shard {
 /// `get_sharded("tensor", 0, 0, 2)` means `tensor.i((..512))`
 /// `get_sharded("tensor", 0, 1, 2)` means `tensor.i((512..))`
 /// `get_sharded("tensor", 1, 0, 2)` means `tensor.i((.., ..512))`
-impl<'a> Backend for ShardedSafeTensors<'a> {
+impl Backend for ShardedSafeTensors {
     type Hints = Shard;
 
     fn get(
@@ -581,18 +655,7 @@ impl<'a> Backend for ShardedSafeTensors<'a> {
             rank,
             world_size,
         } = h;
-        let SafeTensorWithRouting {
-            routing,
-            safetensors,
-        } = &self.0;
-        let index = routing.get(path).ok_or_else(|| {
-            Error::CannotFindTensor {
-                path: path.to_string(),
-            }
-            .bt()
-        })?;
-
-        let view = safetensors[*index].tensor(path)?;
+        let view = self.0.get(path)?;
         let view_dtype = view.dtype();
         let mut shape = view.shape().to_vec();
         let size = shape[dim];
@@ -635,7 +698,7 @@ impl<'a> Backend for ShardedSafeTensors<'a> {
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        self.0.routing.contains_key(name)
+        self.0.get(name).is_ok()
     }
 
     fn keys(&self) -> Option<Vec<String>> {

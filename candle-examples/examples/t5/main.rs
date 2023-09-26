@@ -8,12 +8,12 @@ use std::path::PathBuf;
 
 use candle_transformers::models::t5;
 
-use anyhow::{anyhow, Error as E, Result};
+use anyhow::{Error as E, Result};
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
 use clap::Parser;
-use hf_hub::{api::sync::Api, Cache, Repo, RepoType};
+use hf_hub::{api::sync::Api, Repo, RepoType};
 use tokenizers::Tokenizer;
 
 const DTYPE: DType = DType::F32;
@@ -24,10 +24,6 @@ struct Args {
     /// Run on CPU rather than on GPU.
     #[arg(long)]
     cpu: bool,
-
-    /// Run offline (you must have the files already cached)
-    #[arg(long)]
-    offline: bool,
 
     /// Enable tracing (generates a trace-timestamp.json file).
     #[arg(long)]
@@ -46,11 +42,15 @@ struct Args {
 
     // Enable/disable decoding.
     #[arg(long, default_value = "false")]
-    use_cache: bool,
+    disable_cache: bool,
 
     /// Use this prompt, otherwise compute sentence similarities.
     #[arg(long)]
     prompt: Option<String>,
+
+    /// If set along with --decode, will use this prompt to initialize the decoder.
+    #[arg(long)]
+    decoder_prompt: Option<String>,
 
     /// L2 normalization for embeddings.
     #[arg(long, default_value = "true")]
@@ -76,7 +76,7 @@ struct Args {
 struct T5ModelBuilder {
     device: Device,
     config: t5::Config,
-    weights_filename: PathBuf,
+    weights_filename: Vec<PathBuf>,
 }
 
 impl T5ModelBuilder {
@@ -91,32 +91,25 @@ impl T5ModelBuilder {
             (None, None) => (default_model, default_revision),
         };
 
-        let repo = Repo::with_revision(model_id, RepoType::Model, revision);
-        let (config_filename, tokenizer_filename, weights_filename) = if args.offline {
-            let cache = Cache::default().repo(repo);
-            (
-                cache
-                    .get("config.json")
-                    .ok_or(anyhow!("Missing config file in cache"))?,
-                cache
-                    .get("tokenizer.json")
-                    .ok_or(anyhow!("Missing tokenizer file in cache"))?,
-                cache
-                    .get("model.safetensors")
-                    .ok_or(anyhow!("Missing weights file in cache"))?,
-            )
+        let repo = Repo::with_revision(model_id.clone(), RepoType::Model, revision);
+        let api = Api::new()?;
+        let api = api.repo(repo);
+        let config_filename = api.get("config.json")?;
+        let tokenizer_filename = api.get("tokenizer.json")?;
+        let weights_filename = if model_id == "google/flan-t5-xxl" {
+            vec![
+                api.get("model-00001-of-00005.safetensors")?,
+                api.get("model-00002-of-00005.safetensors")?,
+                api.get("model-00003-of-00005.safetensors")?,
+                api.get("model-00004-of-00005.safetensors")?,
+                api.get("model-00005-of-00005.safetensors")?,
+            ]
         } else {
-            let api = Api::new()?;
-            let api = api.repo(repo);
-            (
-                api.get("config.json")?,
-                api.get("tokenizer.json")?,
-                api.get("model.safetensors")?,
-            )
+            vec![api.get("model.safetensors")?]
         };
         let config = std::fs::read_to_string(config_filename)?;
         let mut config: t5::Config = serde_json::from_str(&config)?;
-        config.use_cache = args.use_cache;
+        config.use_cache = !args.disable_cache;
         let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
         Ok((
             Self {
@@ -129,24 +122,35 @@ impl T5ModelBuilder {
     }
 
     pub fn build_encoder(&self) -> Result<t5::T5EncoderModel> {
-        let weights =
-            unsafe { candle::safetensors::MmapedFile::new(self.weights_filename.clone())? };
-        let weights = weights.deserialize()?;
-        let vb = VarBuilder::from_safetensors(vec![weights], DTYPE, &self.device);
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&self.weights_filename, DTYPE, &self.device)?
+        };
         Ok(t5::T5EncoderModel::load(vb, &self.config)?)
     }
 
     pub fn build_conditional_generation(&self) -> Result<t5::T5ForConditionalGeneration> {
-        let weights =
-            unsafe { candle::safetensors::MmapedFile::new(self.weights_filename.clone())? };
-        let weights = weights.deserialize()?;
-        let vb = VarBuilder::from_safetensors(vec![weights], DTYPE, &self.device);
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&self.weights_filename, DTYPE, &self.device)?
+        };
         Ok(t5::T5ForConditionalGeneration::load(vb, &self.config)?)
     }
 }
 
 fn main() -> Result<()> {
+    use tracing_chrome::ChromeLayerBuilder;
+    use tracing_subscriber::prelude::*;
+
     let args = Args::parse();
+
+    let _guard = if args.tracing {
+        println!("tracing...");
+        let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
+        tracing_subscriber::registry().with(chrome_layer).init();
+        Some(guard)
+    } else {
+        None
+    };
+
     let (builder, mut tokenizer) = T5ModelBuilder::load(&args)?;
     let device = &builder.device;
     let tokenizer = tokenizer
@@ -170,6 +174,16 @@ fn main() -> Result<()> {
             } else {
                 let mut model = builder.build_conditional_generation()?;
                 let mut output_token_ids = [builder.config.pad_token_id as u32].to_vec();
+                if let Some(decoder_prompt) = &args.decoder_prompt {
+                    print!("{decoder_prompt}");
+                    output_token_ids.extend(
+                        tokenizer
+                            .encode(decoder_prompt.to_string(), false)
+                            .map_err(E::msg)?
+                            .get_ids()
+                            .to_vec(),
+                    );
+                }
                 let temperature = if args.temperature <= 0. {
                     None
                 } else {
@@ -195,11 +209,11 @@ fn main() -> Result<()> {
                     let logits = if args.repeat_penalty == 1. {
                         logits
                     } else {
-                        let start_at = tokens.len().saturating_sub(args.repeat_last_n);
+                        let start_at = output_token_ids.len().saturating_sub(args.repeat_last_n);
                         candle_transformers::utils::apply_repeat_penalty(
                             &logits,
                             args.repeat_penalty,
-                            &tokens[start_at..],
+                            &output_token_ids[start_at..],
                         )?
                     };
 
@@ -217,8 +231,8 @@ fn main() -> Result<()> {
                 let dt = start.elapsed();
                 println!(
                     "\n{} tokens generated ({:.2} token/s)\n",
-                    tokens.len(),
-                    tokens.len() as f64 / dt.as_secs_f64(),
+                    output_token_ids.len(),
+                    output_token_ids.len() as f64 / dt.as_secs_f64(),
                 );
             }
         }

@@ -8,6 +8,7 @@ Candle is a minimalist ML framework for Rust with a focus on performance (includ
 and ease of use. Try our online demos: 
 [whisper](https://huggingface.co/spaces/lmz/candle-whisper),
 [LLaMA2](https://huggingface.co/spaces/lmz/candle-llama2),
+[T5](https://huggingface.co/spaces/radames/Candle-T5-Generation-Wasm),
 [yolo](https://huggingface.co/spaces/lmz/candle-yolo),
 [Segment
 Anything](https://huggingface.co/spaces/radames/candle-segment-anything-wasm).
@@ -52,14 +53,15 @@ These online demos run entirely in your browser:
   object recognition.
 - [whisper](https://huggingface.co/spaces/lmz/candle-whisper): text to speech.
 - [LLaMA2](https://huggingface.co/spaces/lmz/candle-llama2): text generation.
+- [T5](https://huggingface.co/spaces/radames/Candle-T5-Generation-Wasm): text generation.
 - [Segment Anything Model](https://huggingface.co/spaces/radames/candle-segment-anything-wasm): Image segmentation.
 
 We also provide a some command line based examples using state of the art models:
 
 - [LLaMA and LLaMA-v2](./candle-examples/examples/llama/): general LLM.
 - [Falcon](./candle-examples/examples/falcon/): general LLM.
-- [StarCoder](./candle-examples/examples/bigcode/): LLM specialized to code
-  generation.
+- [Phi-v1.5](./candle-examples/examples/phi/): a 1.3b general LLM with performance on par with LLaMA-v2 7b.
+- [StarCoder](./candle-examples/examples/bigcode/): LLM specialized to code generation.
 - [Quantized LLaMA](./candle-examples/examples/quantized/): quantized version of
   the LLaMA model using the same quantization techniques as
   [llama.cpp](https://github.com/ggerganov/llama.cpp).
@@ -70,6 +72,11 @@ We also provide a some command line based examples using state of the art models
   image generative model, support for the 1.5, 2.1, and SDXL 1.0 versions.
 
 <img src="https://github.com/huggingface/candle/raw/main/candle-examples/examples/stable-diffusion/assets/stable-diffusion-xl.jpg" width="200">
+
+- [Wuerstchen](./candle-examples/examples/wuerstchen/): another text to
+  image generative model.
+
+<img src="https://github.com/huggingface/candle/raw/main/candle-examples/examples/wuerstchen/assets/cat.jpg" width="200">
 
 - [yolo-v3](./candle-examples/examples/yolo-v3/) and
   [yolo-v8](./candle-examples/examples/yolo-v8/): object detection and pose
@@ -100,6 +107,7 @@ There are also some wasm examples for whisper and
 `trunk` or try them online:
 [whisper](https://huggingface.co/spaces/lmz/candle-whisper),
 [llama2](https://huggingface.co/spaces/lmz/candle-llama2),
+[T5](https://huggingface.co/spaces/radames/Candle-T5-Generation-Wasm),
 [Segment Anything Model](https://huggingface.co/spaces/radames/candle-segment-anything-wasm).
 
 For LLaMA2, run the following command to retrieve the weight files and start a
@@ -138,10 +146,12 @@ If you have an addition to this list, please submit a pull request.
         - LLaMA v1 and v2.
         - Falcon.
         - StarCoder.
+        - Phi v1.5.
         - T5.
         - Bert.
     - Whisper (multi-lingual support).
     - Stable Diffusion v1.5, v2.1, XL v1.0.
+    - Wurstchen v2.
     - Computer Vision Models.
         - DINOv2.
         - EfficientNet.

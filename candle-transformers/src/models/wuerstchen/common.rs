@@ -35,6 +35,34 @@ impl Module for WLayerNorm {
 }
 
 #[derive(Debug)]
+pub struct LayerNormNoWeights {
+    eps: f64,
+}
+
+impl LayerNormNoWeights {
+    pub fn new(_size: usize) -> Result<Self> {
+        Ok(Self { eps: 1e-6 })
+    }
+}
+
+impl Module for LayerNormNoWeights {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let x_dtype = xs.dtype();
+        let internal_dtype = match x_dtype {
+            DType::F16 | DType::BF16 => DType::F32,
+            d => d,
+        };
+        let hidden_size = xs.dim(D::Minus1)?;
+        let xs = xs.to_dtype(internal_dtype)?;
+        let mean_x = (xs.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let xs = xs.broadcast_sub(&mean_x)?;
+        let norm_x = (xs.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        xs.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?
+            .to_dtype(x_dtype)
+    }
+}
+
+#[derive(Debug)]
 pub struct TimestepBlock {
     mapper: candle_nn::Linear,
 }
@@ -72,7 +100,7 @@ impl GlobalResponseNorm {
 
 impl Module for GlobalResponseNorm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let agg_norm = xs.sqr()?.sum_keepdim((1, 2))?;
+        let agg_norm = xs.sqr()?.sum_keepdim((1, 2))?.sqrt()?;
         let stand_div_norm =
             agg_norm.broadcast_div(&(agg_norm.mean_keepdim(D::Minus1)? + 1e-6)?)?;
         xs.broadcast_mul(&stand_div_norm)?
@@ -124,7 +152,7 @@ impl ResBlock {
             .permute((0, 2, 3, 1))?;
         let xs = xs
             .apply(&self.channelwise_lin1)?
-            .gelu()?
+            .gelu_erf()?
             .apply(&self.channelwise_grn)?
             .apply(&self.channelwise_lin2)?
             .permute((0, 3, 1, 2))?;
@@ -146,10 +174,11 @@ impl AttnBlock {
         c_cond: usize,
         nhead: usize,
         self_attn: bool,
+        use_flash_attn: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let norm = WLayerNorm::new(c)?;
-        let attention = Attention::new(c, nhead, c / nhead, vb.pp("attention"))?;
+        let attention = Attention::new(c, nhead, c / nhead, use_flash_attn, vb.pp("attention"))?;
         let kv_mapper_lin = candle_nn::linear(c_cond, c, vb.pp("kv_mapper.1"))?;
         Ok(Self {
             self_attn,

@@ -130,7 +130,7 @@ impl Sam {
     pub fn forward(
         &self,
         img: &Tensor,
-        point: Option<(f64, f64)>,
+        points: &[(f64, f64)],
         multimask_output: bool,
     ) -> Result<(Tensor, Tensor)> {
         let (_c, original_h, original_w) = img.dims3()?;
@@ -140,7 +140,7 @@ impl Sam {
             &img_embeddings,
             original_h,
             original_w,
-            point,
+            points,
             multimask_output,
         )?;
         let mask = low_res_mask
@@ -155,20 +155,25 @@ impl Sam {
         img_embeddings: &Tensor,
         original_h: usize,
         original_w: usize,
-        point: Option<(f64, f64)>,
+        points: &[(f64, f64)],
         multimask_output: bool,
     ) -> Result<(Tensor, Tensor)> {
         let image_pe = self.prompt_encoder.get_dense_pe()?;
-        let points = match point {
-            None => None,
-            Some((x, y)) => {
-                let points = Tensor::new(
-                    &[[[x as f32 * original_w as f32, y as f32 * original_h as f32]]],
-                    img_embeddings.device(),
-                )?;
-                let labels = Tensor::ones((1, 1), DType::F32, img_embeddings.device())?;
-                Some((points, labels))
-            }
+        let points = if points.is_empty() {
+            None
+        } else {
+            let n_points = points.len();
+            let xys = points
+                .iter()
+                .flat_map(|(x, y)| {
+                    let x = (*x as f32) * (original_w as f32);
+                    let y = (*y as f32) * (original_h as f32);
+                    [x, y]
+                })
+                .collect::<Vec<_>>();
+            let points = Tensor::from_vec(xys, (n_points, 1, 2), img_embeddings.device())?;
+            let labels = Tensor::ones((n_points, 1), DType::F32, img_embeddings.device())?;
+            Some((points, labels))
         };
         let points = points.as_ref().map(|(x, y)| (x, y));
         let (sparse_prompt_embeddings, dense_prompt_embeddings) =

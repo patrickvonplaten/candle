@@ -1,4 +1,4 @@
-use candle_core::{test_device, DType, Device, IndexOp, Result, Tensor};
+use candle_core::{test_device, test_utils, DType, Device, IndexOp, Result, Tensor};
 
 fn zeros(device: &Device) -> Result<()> {
     let tensor = Tensor::zeros((5, 2), DType::F32, device)?;
@@ -40,6 +40,33 @@ fn clamp(device: &Device) -> Result<()> {
     assert_eq!(
         tensor.to_vec2::<f32>()?,
         [[3.0, 1.5, 4.0, 1.5, 5.0], [2.0, 1.5, 6.2, 6.2, 2.0]],
+    );
+    Ok(())
+}
+
+fn unary_op(device: &Device) -> Result<()> {
+    let data = &[[-3f32, 1., 4., -0.1, 0.5], [2.7, -1.8, -0.28, 1.8, 2.8]];
+    let tensor = Tensor::new(data, device)?;
+    assert_eq!(
+        test_utils::to_vec2_round(&tensor.gelu()?, 4)?,
+        [
+            [-0.0036, 0.8412, 3.9999, -0.046, 0.3457],
+            [2.6911, -0.0647, -0.1091, 1.7353, 2.7933]
+        ]
+    );
+    assert_eq!(
+        test_utils::to_vec2_round(&tensor.gelu_erf()?, 4)?,
+        [
+            [-0.004, 0.8413, 3.9999, -0.046, 0.3457],
+            [2.6906, -0.0647, -0.1091, 1.7353, 2.7928]
+        ]
+    );
+    assert_eq!(
+        test_utils::to_vec2_round(&tensor.erf()?, 4)?,
+        [
+            [-1.0, 0.8427, 1.0, -0.1125, 0.5205],
+            [0.9999, -0.9891, -0.3079, 0.9891, 0.9999]
+        ]
     );
     Ok(())
 }
@@ -647,6 +674,48 @@ fn index_add(device: &Device) -> Result<()> {
     Ok(())
 }
 
+fn slice_scatter(device: &Device) -> Result<()> {
+    let t = Tensor::arange(0f32, 12f32, device)?.reshape((4, 3))?;
+    assert_eq!(
+        t.to_vec2::<f32>()?,
+        &[
+            [0.0, 1.0, 2.0],
+            [3.0, 4.0, 5.0],
+            [6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0]
+        ]
+    );
+    let src = Tensor::arange(100f32, 106f32, device)?.reshape((2, 3))?;
+    assert_eq!(
+        t.slice_scatter0(&src, 0)?.to_vec2::<f32>()?,
+        &[
+            [100.0, 101.0, 102.0],
+            [103.0, 104.0, 105.0],
+            [6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0]
+        ]
+    );
+    assert_eq!(
+        t.slice_scatter0(&src, 1)?.to_vec2::<f32>()?,
+        &[
+            [0.0, 1.0, 2.0],
+            [100.0, 101.0, 102.0],
+            [103.0, 104.0, 105.0],
+            [9.0, 10.0, 11.0]
+        ]
+    );
+    assert_eq!(
+        t.slice_scatter0(&src, 2)?.to_vec2::<f32>()?,
+        &[
+            [0.0, 1.0, 2.0],
+            [3.0, 4.0, 5.0],
+            [100.0, 101.0, 102.0],
+            [103.0, 104.0, 105.0],
+        ]
+    );
+    Ok(())
+}
+
 fn scatter_add(device: &Device) -> Result<()> {
     let t = Tensor::arange(0f32, 12f32, device)?.reshape((4, 3))?;
     assert_eq!(
@@ -908,6 +977,7 @@ test_device!(max, max_cpu, max_gpu);
 test_device!(argmax, argmax_cpu, argmax_gpu);
 test_device!(argmin, argmin_cpu, argmin_gpu);
 test_device!(transpose, transpose_cpu, transpose_gpu);
+test_device!(unary_op, unary_op_cpu, unary_op_gpu);
 test_device!(binary_op, binary_op_cpu, binary_op_gpu);
 test_device!(embeddings, embeddings_cpu, embeddings_gpu);
 test_device!(cmp, cmp_cpu, cmp_gpu);
@@ -918,6 +988,7 @@ test_device!(index_select, index_select_cpu, index_select_gpu);
 test_device!(index_add, index_add_cpu, index_add_gpu);
 test_device!(gather, gather_cpu, gather_gpu);
 test_device!(scatter_add, scatter_add_cpu, scatter_add_gpu);
+test_device!(slice_scatter, slice_scatter_cpu, slice_scatter_gpu);
 test_device!(randn, randn_cpu, randn_gpu);
 test_device!(clamp, clamp_cpu, clamp_gpu);
 

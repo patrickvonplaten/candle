@@ -27,13 +27,9 @@ struct Args {
     #[arg(long)]
     generate_masks: bool,
 
-    /// The target point x coordinate, between 0 and 1 (0.5 is at the middle of the image).
-    #[arg(long, default_value_t = 0.5)]
-    point_x: f64,
-
-    /// The target point y coordinate, between 0 and 1 (0.5 is at the middle of the image).
-    #[arg(long, default_value_t = 0.5)]
-    point_y: f64,
+    /// List of x,y coordinates, between 0 and 1 (0.5 is at the middle of the image).
+    #[arg(long)]
+    point: Vec<String>,
 
     /// The detection threshold for the mask, 0 is the default value, negative values mean a larger
     /// mask, positive makes the mask more selective.
@@ -82,9 +78,7 @@ pub fn main() -> anyhow::Result<()> {
             api.get(filename)?
         }
     };
-    let weights = unsafe { candle::safetensors::MmapedFile::new(model)? };
-    let weights = weights.deserialize()?;
-    let vb = VarBuilder::from_safetensors(vec![weights], DType::F32, &device);
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model], DType::F32, &device)? };
     let sam = if args.use_tiny {
         sam::Sam::new_tiny(vb)? // tiny vit_t
     } else {
@@ -113,9 +107,20 @@ pub fn main() -> anyhow::Result<()> {
             )?;
         }
     } else {
-        let point = Some((args.point_x, args.point_y));
+        let points = args
+            .point
+            .iter()
+            .map(|point| {
+                use std::str::FromStr;
+                let xy = point.split(',').collect::<Vec<_>>();
+                if xy.len() != 2 {
+                    anyhow::bail!("expected format for points is 0.4,0.2")
+                }
+                Ok((f64::from_str(xy[0])?, f64::from_str(xy[1])?))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let start_time = std::time::Instant::now();
-        let (mask, iou_predictions) = sam.forward(&image, point, false)?;
+        let (mask, iou_predictions) = sam.forward(&image, &points, false)?;
         println!(
             "mask generated in {:.2}s",
             start_time.elapsed().as_secs_f32()
@@ -153,12 +158,17 @@ pub fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        let (x, y) = (
-            (args.point_x * img.width() as f64) as i32,
-            (args.point_y * img.height() as f64) as i32,
-        );
-        imageproc::drawing::draw_filled_circle(&img, (x, y), 3, image::Rgba([255, 0, 0, 200]))
-            .save("sam_merged.jpg")?
+        for (x, y) in points {
+            let x = (x * img.width() as f64) as i32;
+            let y = (y * img.height() as f64) as i32;
+            imageproc::drawing::draw_filled_circle_mut(
+                &mut img,
+                (x, y),
+                3,
+                image::Rgba([255, 0, 0, 200]),
+            );
+        }
+        img.save("sam_merged.jpg")?
     }
     Ok(())
 }

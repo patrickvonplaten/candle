@@ -1,12 +1,12 @@
-use super::common::WLayerNorm;
+use super::common::LayerNormNoWeights;
 use candle::{Module, Result, Tensor};
 use candle_nn::VarBuilder;
 
 #[derive(Debug)]
 pub struct MixingResidualBlock {
-    norm1: WLayerNorm,
+    norm1: LayerNormNoWeights,
     depthwise_conv: candle_nn::Conv2d,
-    norm2: WLayerNorm,
+    norm2: LayerNormNoWeights,
     channelwise_lin1: candle_nn::Linear,
     channelwise_lin2: candle_nn::Linear,
     gammas: Vec<f32>,
@@ -14,8 +14,8 @@ pub struct MixingResidualBlock {
 
 impl MixingResidualBlock {
     pub fn new(inp: usize, embed_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let norm1 = WLayerNorm::new(inp)?;
-        let norm2 = WLayerNorm::new(inp)?;
+        let norm1 = LayerNormNoWeights::new(inp)?;
+        let norm2 = LayerNormNoWeights::new(inp)?;
         let cfg = candle_nn::Conv2dConfig {
             groups: inp,
             ..Default::default()
@@ -52,6 +52,7 @@ impl Module for MixingResidualBlock {
             .affine(1. + mods[3] as f64, mods[4] as f64)?;
         let x_temp = x_temp
             .permute((0, 2, 3, 1))?
+            .contiguous()?
             .apply(&self.channelwise_lin1)?
             .gelu()?
             .apply(&self.channelwise_lin2)?
@@ -105,8 +106,7 @@ impl PaellaVQ {
                     stride: 2,
                     ..Default::default()
                 };
-                let block =
-                    candle_nn::conv2d_no_bias(C_LEVELS[i - 1], c_level, 4, cfg, vb_d.pp(d_idx))?;
+                let block = candle_nn::conv2d(C_LEVELS[i - 1], c_level, 4, cfg, vb_d.pp(d_idx))?;
                 d_idx += 1;
                 Some(block)
             } else {
@@ -129,7 +129,7 @@ impl PaellaVQ {
         let mut up_blocks = Vec::new();
         let vb_u = vb.pp("up_blocks");
         let mut u_idx = 0;
-        let up_blocks_conv = candle_nn::conv2d_no_bias(
+        let up_blocks_conv = candle_nn::conv2d(
             LATENT_CHANNELS,
             C_LEVELS[1],
             1,
@@ -151,7 +151,7 @@ impl PaellaVQ {
                     stride: 2,
                     ..Default::default()
                 };
-                let block = candle_nn::conv_transpose2d_no_bias(
+                let block = candle_nn::conv_transpose2d(
                     c_level,
                     C_LEVELS[C_LEVELS.len() - i - 2],
                     4,

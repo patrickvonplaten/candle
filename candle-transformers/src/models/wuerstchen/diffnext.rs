@@ -1,4 +1,4 @@
-use super::common::{AttnBlock, GlobalResponseNorm, TimestepBlock, WLayerNorm};
+use super::common::{AttnBlock, GlobalResponseNorm, LayerNormNoWeights, TimestepBlock, WLayerNorm};
 use candle::{DType, Module, Result, Tensor, D};
 use candle_nn::VarBuilder;
 
@@ -41,6 +41,7 @@ impl ResBlockStageB {
         };
         let xs = xs
             .permute((0, 2, 3, 1))?
+            .contiguous()?
             .apply(&self.channelwise_lin1)?
             .gelu()?
             .apply(&self.channelwise_grn)?
@@ -75,7 +76,7 @@ struct UpBlock {
 pub struct WDiffNeXt {
     clip_mapper: candle_nn::Linear,
     effnet_mappers: Vec<Option<candle_nn::Conv2d>>,
-    seq_norm: WLayerNorm,
+    seq_norm: LayerNormNoWeights,
     embedding_conv: candle_nn::Conv2d,
     embedding_ln: WLayerNorm,
     down_blocks: Vec<DownBlock>,
@@ -87,6 +88,7 @@ pub struct WDiffNeXt {
 }
 
 impl WDiffNeXt {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         c_in: usize,
         c_out: usize,
@@ -94,6 +96,7 @@ impl WDiffNeXt {
         c_cond: usize,
         clip_embd: usize,
         patch_size: usize,
+        use_flash_attn: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         const C_HIDDEN: [usize; 4] = [320, 640, 1280, 1280];
@@ -133,7 +136,7 @@ impl WDiffNeXt {
             };
             effnet_mappers.push(c)
         }
-        let seq_norm = WLayerNorm::new(c_cond)?;
+        let seq_norm = LayerNormNoWeights::new(c_cond)?;
         let embedding_ln = WLayerNorm::new(C_HIDDEN[0])?;
         let embedding_conv = candle_nn::conv2d(
             c_in * patch_size * patch_size,
@@ -168,8 +171,14 @@ impl WDiffNeXt {
                 let attn_block = if i == 0 {
                     None
                 } else {
-                    let attn_block =
-                        AttnBlock::new(c_hidden, c_cond, NHEAD[i], true, vb.pp(layer_i))?;
+                    let attn_block = AttnBlock::new(
+                        c_hidden,
+                        c_cond,
+                        NHEAD[i],
+                        true,
+                        use_flash_attn,
+                        vb.pp(layer_i),
+                    )?;
                     layer_i += 1;
                     Some(attn_block)
                 };
@@ -207,8 +216,14 @@ impl WDiffNeXt {
                 let attn_block = if i == 0 {
                     None
                 } else {
-                    let attn_block =
-                        AttnBlock::new(c_hidden, c_cond, NHEAD[i], true, vb.pp(layer_i))?;
+                    let attn_block = AttnBlock::new(
+                        c_hidden,
+                        c_cond,
+                        NHEAD[i],
+                        true,
+                        use_flash_attn,
+                        vb.pp(layer_i),
+                    )?;
                     layer_i += 1;
                     Some(attn_block)
                 };
@@ -335,6 +350,7 @@ impl WDiffNeXt {
             level_outputs.push(xs.clone())
         }
         level_outputs.reverse();
+        let mut xs = level_outputs[0].clone();
 
         for (i, up_block) in self.up_blocks.iter().enumerate() {
             let effnet_c = match &self.effnet_mappers[self.down_blocks.len() + i] {
@@ -373,7 +389,7 @@ impl WDiffNeXt {
             .apply(&self.clf_ln)?
             .apply(&self.clf_conv)?
             .apply(&|xs: &_| candle_nn::ops::pixel_shuffle(xs, self.patch_size))?
-            .chunk(1, 2)?;
+            .chunk(2, 1)?;
         let b = ((candle_nn::ops::sigmoid(&ab[1])? * (1. - EPS * 2.))? + EPS)?;
         (x_in - &ab[0])? / b
     }
