@@ -19,57 +19,38 @@ pub struct BlockConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct UVit2DConditionModelConfig {
-    pub center_input_sample: bool,
-    pub flip_sin_to_cos: bool,
-    pub freq_shift: f64,
-    pub blocks: Vec<BlockConfig>,
+pub struct UViTTransformerConfig {
+    pub in_channels: usize,
+    pub out_channels: usize,
     pub layers_per_block: usize,
-    pub downsample_padding: usize,
-    pub mid_block_scale_factor: f64,
+    pub attn_head_dim: usize,
+    pub context_dim: usize,
+    pub condition_input: usize,
+    pub encoder_hidden_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
     pub norm_num_groups: usize,
     pub norm_eps: f64,
-    pub cross_attention_dim: usize,
-    pub sliced_attention_size: Option<usize>,
-    pub use_linear_projection: bool,
 }
 
-impl Default for UVit2DConditionModelConfig {
+impl Default for UViTTransformerConfig {
     fn default() -> Self {
         Self {
-            center_input_sample: false,
-            flip_sin_to_cos: true,
-            freq_shift: 0.,
-            blocks: vec![
-                BlockConfig {
-                    out_channels: 320,
-                    use_cross_attn: Some(1),
-                    attention_head_dim: 8,
-                },
-                BlockConfig {
-                    out_channels: 640,
-                    use_cross_attn: Some(1),
-                    attention_head_dim: 8,
-                },
-                BlockConfig {
-                    out_channels: 1280,
-                    use_cross_attn: Some(1),
-                    attention_head_dim: 8,
-                },
-                BlockConfig {
-                    out_channels: 1280,
-                    use_cross_attn: None,
-                    attention_head_dim: 8,
-                },
-            ],
-            layers_per_block: 2,
-            downsample_padding: 1,
-            mid_block_scale_factor: 1.,
+            in_channels: 768,
+            out_channels: 768,
+            layers_per_block: 3,
+            attn_head_dim: 64,
+            context_dim: 768,
+            condition_input: 128,
+            encoder_hidden_size: 768,
+            num_hidden_layers: 22,
+            num_attention_heads: 16,
+            vocab_size: 8256,
+            hidden_size: 1024,
             norm_num_groups: 32,
-            norm_eps: 1e-5,
-            cross_attention_dim: 1280,
-            sliced_attention_size: None,
-            use_linear_projection: false,
+            norm_eps: 1e-6,
         }
     }
 }
@@ -230,8 +211,45 @@ impl ConvEmbedding {
 }
 
 #[derive(Debug)]
+pub struct ResBlock {
+    depthwise: nn::Conv2d,
+    norm: nn::RmsNorm,
+    linear_1: nn::Linear,
+    linear_2: nn::Linear,
+    adaLN_modulation: AdaLNModulation,
+}
+
+impl ResBlock {
+    pub fn new(
+        in_channels: usize,
+        res_ffn_factor: usize,
+        norm_eps: f64,
+        vs: nn::VarBuilder,
+    ) -> Result<Self> {
+        let conv_cfg = Default::default();
+        let depthwise = nn::conv2d(in_channels, in_channels, 3, conv_cfg, vs.pp("depthwise"))?;
+        let norm = nn::rms_norm(in_channels, norm_eps, vs.pp("attn_layer_norm"))?;
+
+        let linear_hid_size = (res_ffn_factor * in_channels) as usize;
+        let seq_vs = vs.pp("channelwise");
+        let linear_1 = nn::linear(in_channels, linear_hid_size, seq_vs.pp("0"))?;
+        let linear_2 = nn::linear(in_channels, linear_hid_size, seq_vs.pp("4"))?;
+
+        let adaLN_modulation = AdaLNModulation::new(in_channels, vs.pp("adaLN_modulation"))?;
+
+        Ok(Self {
+            depthwise,
+            norm,
+            linear_1,
+            linear_2,
+            adaLN_modulation,
+        })
+    }
+}
+
+#[derive(Debug)]
 pub struct DownsampleBlock {
-    resnets: Vec<ResnetBlock2D>,
+    resnets: Vec<ResBlock>,
     attentions: Vec<AttentionBlock2D>,
     span: tracing::Span,
 }
@@ -244,21 +262,14 @@ impl DownsampleBlock {
         attn_num_head_channels: usize,
         context_dim: usize,
         use_flash_attn: bool,
+        norm_eps: f64,
         vs: nn::VarBuilder,
     ) -> Result<Self> {
         let n_heads = attn_num_head_channels;
 
         let vs_resnets = vs.pp("res_blocks");
         let resnets = (0..num_downblock_layers)
-            .map(|i| {
-                ResnetBlock2D::new(
-                    out_channels,
-                    n_heads,
-                    out_channels / n_heads,
-                    use_flash_attn,
-                    vs_resnets.pp(&i.to_string()),
-                )
-            })
+            .map(|i| ResBlock::new(out_channels, 4, norm_eps, vs_resnets.pp(&i.to_string())))
             .collect::<Result<Vec<_>>>()?;
 
         let vs_attn = vs.pp("attention_blocks");
@@ -282,37 +293,12 @@ impl DownsampleBlock {
             span,
         })
     }
-
-    pub fn forward(
-        &self,
-        xs: &Tensor,
-        temb: Option<&Tensor>,
-        encoder_hidden_states: Option<&Tensor>,
-    ) -> Result<(Tensor, Vec<Tensor>)> {
-        let _enter = self.span.enter();
-        let mut output_states = vec![];
-        let mut xs = xs.clone();
-        for (resnet, attn) in self.downblock.resnets.iter().zip(self.attentions.iter()) {
-            xs = resnet.forward(&xs, temb)?;
-            xs = attn.forward(&xs, encoder_hidden_states)?;
-            output_states.push(xs.clone());
-        }
-        let xs = match &self.downblock.downsampler {
-            Some(downsampler) => {
-                let xs = downsampler.forward(&xs)?;
-                output_states.push(xs.clone());
-                xs
-            }
-            None => xs,
-        };
-        Ok((xs, output_states))
-    }
 }
 
 #[derive(Debug)]
 pub struct UpsampleBlock {
-    resnets: Vec<ResnetBlock2D>,
-    attentions: Vec<SpatialTransformer>,
+    resnets: Vec<ResBlock>,
+    attentions: Vec<AttentionBlock2D>,
     span: tracing::Span,
 }
 
@@ -322,23 +308,16 @@ impl UpsampleBlock {
         out_channels: usize,
         num_upblock_layers: usize,
         attn_num_head_channels: usize,
+        context_dim: usize,
         use_flash_attn: bool,
+        norm_eps: f64,
         vs: nn::VarBuilder,
     ) -> Result<Self> {
         let n_heads = attn_num_head_channels;
 
         let vs_resnets = vs.pp("res_blocks");
         let resnets = (0..num_upblock_layers)
-            .map(|i| {
-                ResnetBlock2D::new(
-                    vs_attn.pp(&i.to_string()),
-                    out_channels,
-                    n_heads,
-                    out_channels / n_heads,
-                    use_flash_attn,
-                    cfg,
-                )
-            })
+            .map(|i| ResBlock::new(out_channels, 4, norm_eps, vs_resnets.pp(&i.to_string())))
             .collect::<Result<Vec<_>>>()?;
 
         let vs_attn = vs.pp("attention_blocks");
@@ -349,6 +328,7 @@ impl UpsampleBlock {
                     out_channels,
                     n_heads,
                     out_channels / n_heads,
+                    Some(context_dim),
                     use_flash_attn,
                     vs_attn.pp(&i.to_string()),
                 )
@@ -361,40 +341,16 @@ impl UpsampleBlock {
             span,
         })
     }
-
-    pub fn forward(
-        &self,
-        xs: &Tensor,
-        temb: Option<&Tensor>,
-        encoder_hidden_states: Option<&Tensor>,
-    ) -> Result<(Tensor, Vec<Tensor>)> {
-        let _enter = self.span.enter();
-        let mut output_states = vec![];
-        let mut xs = xs.clone();
-        for (resnet, attn) in self.downblock.resnets.iter().zip(self.attentions.iter()) {
-            xs = resnet.forward(&xs, temb)?;
-            xs = attn.forward(&xs, encoder_hidden_states)?;
-            output_states.push(xs.clone());
-        }
-        let xs = match &self.downblock.downsampler {
-            Some(downsampler) => {
-                let xs = downsampler.forward(&xs)?;
-                output_states.push(xs.clone());
-                xs
-            }
-            None => xs,
-        };
-        Ok((xs, output_states))
-    }
 }
+
 #[derive(Debug)]
 pub struct AdaLNModulation {
     linear: nn::Linear,
 }
 
 impl AdaLNModulation {
-    pub fn new(hidden_size: usize, vs: nn::VarBuilder) {
-        let linear = nn::linear(hidden_states, 2 * hidden_size, vs.pp("mapper"));
+    pub fn new(hidden_size: usize, vs: nn::VarBuilder) -> Result<Self> {
+        let linear = nn::linear(hidden_size, 2 * hidden_size, vs.pp("mapper"))?;
         Ok(Self { linear })
     }
 }
@@ -413,16 +369,12 @@ impl FeedForward {
     // https://github.com/huggingface/diffusers/blob/d3d22ce5a894becb951eec03e663951b28d45135/src/diffusers/models/attention.py#L347
     /// Creates a new feed-forward layer based on some given input dimension, some
     /// output dimension, and a multiplier to be used for the intermediary layer.
-    fn new(
-        dim: usize,
-        hidden_size: Option<usize>,
-        mult: usize,
-        vs: nn::VarBuilder,
-    ) -> Result<Self> {
-        let inner_dim = dim * mult;
-        let wi_0 = nn::linear(hidden_size, 4 * hidden_size, vs.pp("wi_0"))?;
-        let wi_1 = nn::linear(hidden_size, 4 * hidden_size, vs.pp("wi_1"))?;
-        let wo = nn::linear(4 * hidden_size, hidden_size, vs.pp("wo"))?;
+    fn new(hidden_size: usize, inner_dim: Option<usize>, vs: nn::VarBuilder) -> Result<Self> {
+        let inner_dim = inner_dim.unwrap_or(4 * hidden_size);
+
+        let wi_0 = nn::linear(hidden_size, inner_dim, vs.pp("wi_0"))?;
+        let wi_1 = nn::linear(hidden_size, inner_dim, vs.pp("wi_1"))?;
+        let wo = nn::linear(inner_dim, hidden_size, vs.pp("wo"))?;
 
         let span = tracing::span!(tracing::Level::TRACE, "ff");
         Ok(Self {
@@ -446,11 +398,13 @@ impl ConvMLMLayer {
         in_channels: usize,
         vocab_size: usize,
         out_channels: usize,
+        eps: f64,
         vs: nn::VarBuilder,
     ) -> Result<Self> {
         let conv_cfg = Default::default();
         let conv1 = nn::conv2d(out_channels, in_channels, 1, conv_cfg, vs.pp("conv1"))?;
         let conv2 = nn::conv2d(in_channels, out_channels, 1, conv_cfg, vs.pp("conv2"))?;
+        let layer_norm = nn::rms_norm(in_channels, eps, vs.pp("layer_norm"))?;
 
         Ok(Self {
             conv1,
@@ -468,7 +422,7 @@ pub struct TransformerLayer {
     cross_attn_layer_norm: nn::RmsNorm,
     cross_attention: CrossAttention,
     cross_attn_adaLN_modulation: AdaLNModulation,
-    ffn: Feedforward,
+    ffn: FeedForward,
 }
 
 impl TransformerLayer {
@@ -477,12 +431,11 @@ impl TransformerLayer {
         num_attention_heads: usize,
         attn_head_dim: usize,
         context_dim: usize,
+        norm_eps: f64,
+        use_flash_attn: bool,
+        vs: nn::VarBuilder,
     ) -> Result<Self> {
-        let attn_layer_Norm = nn::rms_norm(
-            config.hidden_size,
-            config.norm_eps,
-            vs.pp("attn_layer_norm"),
-        )?;
+        let attn_layer_norm = nn::rms_norm(hidden_size, norm_eps, vs.pp("attn_layer_norm"))?;
         let attention = CrossAttention::new(
             vs.pp("attention"),
             hidden_size,
@@ -493,11 +446,8 @@ impl TransformerLayer {
         )?;
         let self_attn_adaLN_modulation =
             AdaLNModulation::new(hidden_size, vs.pp("self_attn_adaLN_modulation"))?;
-        let cross_attn_layer_Norm = nn::rms_norm(
-            config.hidden_size,
-            config.norm_eps,
-            vs.pp("crossattn_layer_norm"),
-        )?;
+        let cross_attn_layer_norm =
+            nn::rms_norm(hidden_size, norm_eps, vs.pp("crossattn_layer_norm"))?;
         let cross_attention = CrossAttention::new(
             vs.pp("crossattention"),
             hidden_size,
@@ -508,6 +458,8 @@ impl TransformerLayer {
         )?;
         let cross_attn_adaLN_modulation =
             AdaLNModulation::new(hidden_size, vs.pp("cross_attn_adaLN_modulation"))?;
+
+        let ffn = FeedForward::new(hidden_size, None, vs.pp("ffn"))?;
 
         Ok(Self {
             attn_layer_norm,
@@ -521,51 +473,32 @@ impl TransformerLayer {
     }
 }
 
-// class TransformerLayer(nn.Module):
-//     def __init__(self, config: MaskGiTUViT_v2Config):
-//         super().__init__()
-//
-//         self.attn_layer_norm = Norm(config.hidden_size, config)
-//
-//         self.self_attn_adaLN_modulation = AdaLNModulation(config.hidden_size, config)
-//         self.attention = Attention(config.hidden_size, config.hidden_size, config.num_attention_heads, config)
-//
-//         self.crossattn_layer_norm = Norm(config.hidden_size, config)
-//         self.crossattention = Attention(
-//             config.hidden_size, config.hidden_size, config.num_attention_heads, config
-//         )
-//         self.cross_attn_adaLN_modulation = AdaLNModulation(config.hidden_size, config)
-//
-//         self.ffn = FeedForward(config)
-
 #[derive(Debug)]
-pub struct UVit2DConditionModel {
+pub struct UViTTransformer {
     encoder_proj: nn::Linear,
-    conv_emb: ConvEmbedding,
-    conv_in: Conv2d,
-    time_proj: Timesteps,
-    time_embedding: TimestepEmbedding,
-    down_blocks: Vec<UNetDownBlock>,
-    up_blocks: Vec<UNetUpBlock>,
-    conv_norm_out: nn::GroupNorm,
-    conv_out: Conv2d,
-    span: tracing::Span,
-    config: UVit2DConditionModelConfig,
+    encoder_proj_layer_norm: nn::RmsNorm,
+    embed: ConvEmbedding,
+    cond_embed: ConditionEmbedding,
+    down_blocks: Vec<DownsampleBlock>,
+    up_blocks: Vec<UpsampleBlock>,
+    project_to_hidden_norm: nn::RmsNorm,
+    project_to_hidden: nn::Linear,
+    transformer_layers: Vec<TransformerLayer>,
+    project_from_hidden_norm: nn::RmsNorm,
+    project_from_hidden: nn::Linear,
+    mlm_layer: ConvMLMLayer,
+    config: UViTTransformerConfig,
 }
 
-impl UVit2DConditionModel {
-    pub fn new(
-        in_channels: usize,
-        out_channels: usize,
-        use_flash_attn: bool,
-        config: UVit2DConditionModelConfig,
-        vs: nn::VarBuilder,
-    ) -> Result<Self> {
+impl UViTTransformer {
+    pub fn new(config: UViTTransformerConfig, vs: nn::VarBuilder) -> Result<Self> {
+        let use_flash_attn = false;
         let encoder_proj = nn::linear(
             config.encoder_hidden_size,
             config.context_dim,
             vs.pp("encoder_proj"),
         )?;
+        println!("suh-du");
         let encoder_proj_layer_norm = nn::rms_norm(
             config.hidden_size,
             config.norm_eps,
@@ -586,13 +519,16 @@ impl UVit2DConditionModel {
         )?;
 
         let down_blocks_vs = vs.pp("down_block");
-        let down_blocks = (0..n_blocks)
+        let down_blocks = (0..1)
             .map(|i| {
                 DownsampleBlock::new(
                     config.in_channels,
                     config.out_channels,
-                    false,
-                    config,
+                    config.layers_per_block,
+                    config.attn_head_dim,
+                    config.context_dim,
+                    use_flash_attn,
+                    config.norm_eps,
                     down_blocks_vs.pp(&i.to_string()),
                 )
             })
@@ -602,12 +538,12 @@ impl UVit2DConditionModel {
             config.out_channels,
             config.norm_eps,
             vs.pp("project_to_hidden_norm"),
-        );
+        )?;
         let project_to_hidden = nn::linear(
             config.out_channels,
             config.hidden_size,
             vs.pp("project_to_hidden"),
-        );
+        )?;
 
         let transformer_layers_vs = vs.pp("transformer_layers");
         let transformer_layers = (0..config.num_hidden_layers)
@@ -617,6 +553,8 @@ impl UVit2DConditionModel {
                     config.num_attention_heads,
                     config.attn_head_dim,
                     config.context_dim,
+                    config.norm_eps,
+                    false,
                     transformer_layers_vs.pp(&i.to_string()),
                 )
             })
@@ -626,43 +564,50 @@ impl UVit2DConditionModel {
             config.hidden_size,
             config.norm_eps,
             vs.pp("project_from_hidden_norm"),
-        );
+        )?;
         let project_from_hidden = nn::linear(
             config.hidden_size,
             config.out_channels,
             vs.pp("project_from_hidden"),
-        );
+        )?;
 
         let up_blocks_vs = vs.pp("up_blocks");
         let up_blocks = (0..1)
             .map(|i| {
                 UpsampleBlock::new(
+                    config.in_channels,
                     config.out_channels,
-                    num_upblock_layers,
-                    config.out_channels,
-                    false,
-                    config,
-                    down_blocks_vs.pp(&i.to_string()),
+                    config.layers_per_block,
+                    config.attn_head_dim,
+                    config.context_dim,
+                    use_flash_attn,
+                    config.norm_eps,
+                    up_blocks_vs.pp(&i.to_string()),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mlm_layer = ConvMlmLayer::new(
-            in_channels,
+        let mlm_layer = ConvMLMLayer::new(
+            config.in_channels,
             config.vocab_size,
             config.out_channels,
+            config.norm_eps,
             vs.pp("mlm_layer"),
-        );
+        )?;
 
         Ok(Self {
-            conv_in,
-            time_proj,
-            time_embedding,
+            encoder_proj,
+            encoder_proj_layer_norm,
+            embed,
+            cond_embed,
             down_blocks,
             up_blocks,
-            conv_norm_out,
-            conv_out,
-            span,
+            project_to_hidden_norm,
+            project_to_hidden,
+            transformer_layers,
+            project_from_hidden_norm,
+            project_from_hidden,
+            mlm_layer,
             config,
         })
     }

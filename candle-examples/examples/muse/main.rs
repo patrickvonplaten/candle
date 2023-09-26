@@ -30,7 +30,7 @@ impl ModelFile {
                     Self::Tokenizer => ("openai/clip-vit-large-patch14", "tokenizer.json"),
                     Self::Clip => ("openai/clip-vit-large-patch14", "model.safetensors"),
                     Self::VQGan => ("openMUSE/vqgan-f16-8192-laion", "model.safetensors"),
-                    Self::UViT => ("valhalla/muse-research-run", "ema_model/pytorch_model.bin"),
+                    Self::UViT => ("valhalla/muse-research-run", "ema_model/model.safetensors"),
                 };
                 let filename = Api::new()?.model(repo.to_string()).get(path)?;
                 Ok(filename)
@@ -58,7 +58,8 @@ fn run() -> Result<()> {
 
     println!("Building the UViT.");
     let uvit_weights = ModelFile::UViT.get(None)?;
-    let uvit = muse_config.build_uvit_transformer(&clip_weights, &device, DType::F32);
+    let uvit = muse_config.build_uvit_transformer(&uvit_weights, &device, DType::F32);
+    println!("Hey");
     Ok(())
 }
 

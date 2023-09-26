@@ -17,6 +17,7 @@ pub struct MuseConfig {
     pub height: usize,
     pub clip_config: clip::Config,
     pub vqgan_config: vqgan::VQGANModelConfig,
+    pub uvit_config: uvit::UViTTransformerConfig,
 }
 
 impl MuseConfig {
@@ -40,12 +41,14 @@ impl MuseConfig {
             norm_num_groups: 32,
             num_embeddings: 8192,
         };
+        let uvit_config = uvit::UViTTransformerConfig::default();
 
         Self {
             width,
             height,
             clip_config: clip::Config::v1_5(),
             vqgan_config,
+            uvit_config,
         }
     }
 
@@ -67,7 +70,11 @@ impl MuseConfig {
         uvit_weights: P,
         device: &Device,
         dtype: DType,
-    ) -> Result<clip::UViTTransformer> {
+    ) -> Result<uvit::UViTTransformer> {
+        let weights = unsafe { candle::safetensors::MmapedFile::new(uvit_weights)? };
+        let weights = weights.deserialize()?;
+        let vs = nn::VarBuilder::from_safetensors(vec![weights], dtype, device);
+        let uvit_model = uvit::UViTTransformer::new(self.uvit_config.clone(), vs.clone())?;
         Ok(uvit_model)
     }
 
@@ -82,9 +89,6 @@ impl MuseConfig {
         let vs_vqgan = nn::VarBuilder::from_safetensors(vec![weights], dtype, device);
         let vqgan = vqgan::VQGANModel::new(vs_vqgan.clone(), 3, 3, self.vqgan_config.clone())?;
         Ok(vqgan)
-        // let mut entries: Vec<_> = vs_vqgan.tensors().into_iter().collect();
-        // entries.sort_by(|a, b| a.0.cmp(&b.0));
-
         // // println!("{:?}", vs_vqgan.tensors());
         // // let var_builder = nn::VarBuilder::from_varmap(&nn::VarMap::new(), dtype, device);
         // let var_builder = nn::VarBuilder::shapes(dtype, device);
